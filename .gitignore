@@ -11,5 +11,15 @@ __pycache__/
 .venv/
 venv/
 
+# Secrets
+.env
+
+# Agent runs. Logs and summaries are deliverables and stay tracked; generated CSVs and
+# per-node intermediates do not. The final submission is added explicitly with `git add -f`
+# when the graded run finishes.
+runs/*/nodes/
+runs/*/*.csv
+runs/smoke*/
+
 # OS
 .DS_Store
