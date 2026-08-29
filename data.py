@@ -1,4 +1,4 @@
-"""KuaiRand-Pure 数据加载 + 官方划分 + 特征编码。只依赖标准库和 numpy。"""
+"""KuaiRand-Pure data loading + official splits + feature encoding. Only depends on the standard library and numpy."""
 import csv, os, collections
 import numpy as np
 
@@ -6,11 +6,11 @@ LABEL = 'long_view'
 SPLITS = {'train': (20220408, 20220421),
           'valid': (20220422, 20220428),
           'test':  (20220429, 20220508)}
-# 5 个特征域。想加特征就往这里加 —— 这是学生最该动的地方之一。
+# 5 feature fields. Add features here if you want to -- this is one of the places students should most touch.
 FIELDS = ['user_id', 'video_id', 'author_id', 'tab', 'dur_bucket']
 
 def load(data_dir):
-    """读日志 + 视频侧特征，返回按划分切好的 dict。"""
+    """Reads the logs + video-side features, returns a dict already sliced by split."""
     vid2author = {}
     with open(os.path.join(data_dir, 'video_features_basic_pure.csv')) as fh:
         for r in csv.DictReader(fh):
@@ -33,8 +33,8 @@ def _bucket_edges(durations, n=10):
     return np.quantile(np.asarray(durations), np.linspace(0, 1, n + 1)[1:-1])
 
 def encode(splits):
-    """把类别特征映射成连续 id。未见过的取值统一落到该域的 UNK 槽。
-    返回 (X, y, users) per split，X 为 int32 (N, len(FIELDS))，以及 field_dims。"""
+    """Maps categorical features to contiguous ids. Unseen values all fall into that field's UNK slot.
+    Returns (X, y, users) per split, X being int32 (N, len(FIELDS)), plus field_dims."""
     tr = splits['train']
     edges = _bucket_edges([x[5] for x in tr])
 
@@ -46,7 +46,7 @@ def encode(splits):
         for i, v in enumerate(raw(x)):
             if v not in vocabs[i]:
                 vocabs[i][v] = len(vocabs[i])
-    unk = [len(v) for v in vocabs]                 # 每个域末尾留一个 UNK 槽
+    unk = [len(v) for v in vocabs]                 # leave one UNK slot at the end of each field
     field_dims = [len(v) + 1 for v in vocabs]
     offsets = np.cumsum([0] + field_dims[:-1]).astype(np.int32)
 

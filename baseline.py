@@ -1,8 +1,8 @@
-"""KuaiRand-Pure baselines。
-  --model pop   : item popularity（官方 baseline，纯统计，不训练）
-  --model fm    : Factorization Machine（起步模型，学生从这里往上改）
-  --model random: 随机打分（下界，用来自检评测代码没坏）
-只依赖 numpy。用法见 README.md
+"""KuaiRand-Pure baselines.
+  --model pop   : item popularity (official baseline, pure statistics, no training)
+  --model fm    : Factorization Machine (starting model, students build on top of this)
+  --model random: random scoring (lower bound, used to sanity-check that the evaluation code isn't broken)
+Only depends on numpy. See README.md for usage.
 """
 import argparse, collections, time
 import numpy as np
@@ -11,7 +11,7 @@ from evaluate import evaluate
 
 def sigmoid(x): return 1.0 / (1.0 + np.exp(-np.clip(x, -30, 30)))
 
-# ---------------- item popularity（官方 baseline） ----------------
+# ---------------- item popularity (official baseline) ----------------
 def run_pop(splits, prior=20.0):
     pos, imp = collections.Counter(), collections.Counter()
     for x in splits['train']:
@@ -100,7 +100,7 @@ def run_fm(splits, k=16, lr=0.001, epochs=40, bs=8192, patience=4, seed=0, verbo
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
     ap.add_argument('--data_dir', default='./KuaiRand-Pure/data',
-                    help='KuaiRand-Pure 解压后的 data 目录')
+                    help='the data directory produced by extracting KuaiRand-Pure')
     ap.add_argument('--model', default='fm', choices=['pop', 'fm', 'random'])
     ap.add_argument('--k', type=int, default=16)
     ap.add_argument('--lr', type=float, default=0.001)

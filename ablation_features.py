@@ -1,4 +1,4 @@
-"""把 CWM 的 13 个特征域接进来，验证「用户侧特征在 FM 里是否有用」。"""
+"""Wires in CWM's 13 feature fields to verify "whether user-side features are useful in FM"."""
 import csv, os, collections, statistics
 import numpy as np
 from evaluate import evaluate
@@ -8,7 +8,7 @@ import sys
 D = sys.argv[1] if len(sys.argv) > 1 else './KuaiRand-Pure/data'
 SPLITS={'train':(20220408,20220421),'valid':(20220422,20220428),'test':(20220429,20220508)}
 
-# CWM 的 13 个域
+# CWM's 13 fields
 USER_FE=['follow_user_num_range','register_days_range','fans_user_num_range',
          'friend_user_num_range','user_active_degree']
 VID_FE=['author_id','music_id','video_type','upload_type']
@@ -32,13 +32,13 @@ print({k:len(v) for k,v in splits.items()})
 
 UNKU=['UNK']*len(USER_FE); UNKV=['UNK']*len(VID_FE)
 def build(mode):
-    """mode: 'base'=5域(现kit) / 'item'=只加物品侧 / 'cwm13'=CWM全13域"""
+    """mode: 'base'=5 fields (current kit) / 'item'=item-side only added / 'cwm13'=CWM's full 13 fields"""
     edges=np.quantile([x[4] for x in splits['train']], np.linspace(0,1,11)[1:-1])
     def raw(x):
         ue=u_ext.get(x[1],UNKU); ve=v_ext.get(x[2],UNKV)
-        f=[x[1], x[2], ve[0], x[3], str(int(np.searchsorted(edges,x[4])))]   # 5 域基线
+        f=[x[1], x[2], ve[0], x[3], str(int(np.searchsorted(edges,x[4])))]   # 5-field baseline
         if mode in ('item','cwm13'): f += ve[1:]                              # +music/type/upload
-        if mode=='cwm13':            f += ue                                  # +6 用户侧
+        if mode=='cwm13':            f += ue                                  # +6 user-side
         return f
     n=len(raw(splits['train'][0]))
     vocabs=[dict() for _ in range(n)]
@@ -56,7 +56,7 @@ def build(mode):
         enc[name]=(X,y,us)
     return enc, int(sum(dims)), n
 
-for mode,desc in [('base','5 域（当前 kit）'),('item','+4 物品侧 = 9 域'),('cwm13','CWM 全 13 域')]:
+for mode,desc in [('base','5 fields (current kit)'),('item','+4 item-side = 9 fields'),('cwm13','CWM full 13 fields')]:
     enc,dim,nf=build(mode)
     Xtr,ytr,_=enc['train']; Xva,yva,uva=enc['valid']; Xte,yte,ute=enc['test']
     scores=[]
@@ -75,4 +75,4 @@ for mode,desc in [('base','5 域（当前 kit）'),('item','+4 物品侧 = 9 域
         scores.append(evaluate(ute,yte,m.predict(Xte)))
     g=statistics.mean(s['GAUC'] for s in scores); n5=statistics.mean(s['nDCG@5'] for s in scores)
     pr=statistics.mean(s['primary'] for s in scores); sd=statistics.pstdev([s['primary'] for s in scores])
-    print(f"{desc:20s} ({nf:2d}域) | test GAUC {g:.4f} | nDCG@5 {n5:.4f} | primary {pr:.4f} ± {sd:.4f}")
+    print(f"{desc:20s} ({nf:2d} fields) | test GAUC {g:.4f} | nDCG@5 {n5:.4f} | primary {pr:.4f} ± {sd:.4f}")

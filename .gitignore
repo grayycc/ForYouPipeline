@@ -1,6 +1,8 @@
 # Data (downloaded from kuairand.com, not tracked)
 KuaiRand-Pure/
+data/
 *.tar.gz
+*.tar
 *.csv
 
 # Python
