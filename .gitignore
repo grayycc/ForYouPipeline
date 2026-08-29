@@ -1,0 +1,13 @@
+# Data (downloaded from kuairand.com, not tracked)
+KuaiRand-Pure/
+*.tar.gz
+*.csv
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# OS
+.DS_Store
