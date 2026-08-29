@@ -155,3 +155,29 @@ So you can skip `baseline.py` entirely and use PyTorch, LightGBM, or [CWM](https
 | `baseline_scores.json` | Officially published scores + seed variance + convergence parameters. |
 | `submit.py` | Generate / validate submission files. |
 | `ablation_features.py` | Feature ablation experiments; reproduces the "adding features yields nothing" numbers. |
+
+## Progress log
+
+### 2026-08-29 — Baseline reproduction confirmed
+
+Ran `python3 baseline.py --model random` and `--model fm` locally against the downloaded `KuaiRand-Pure/data` directory.
+
+**Sanity check (random):** primary 0.4757 vs. published ≈0.4753 (±0.001) — harness intact.
+
+**FM baseline (seed=0, test split):**
+
+| | GAUC | nDCG@5 | primary |
+|---|---|---|---|
+| Official FM (test) | 0.6610 | 0.5282 | 0.5946 |
+| This run, seed=0 (test) | 0.6621 | 0.5286 | 0.5953 |
+| Δ | +0.0011 | +0.0004 | +0.0007 |
+
+Δ is within the published seed noise (std = 0.0008 over 5 seeds) — a faithful reproduction, not a fluke. Training converged in ~16.6s CPU (11 epochs, early stop), faster than the README's ~40s estimate.
+
+**Status:** Task requirement 1 (reproduce the official baseline) is satisfied. **0.5946–0.5953 is the number to beat** on the hidden test set going forward.
+
+**⚠️ Open question — metric spec discrepancy, needs resolution before scoring further iterations:**
+
+A constraints/scope document for this challenge states the official metrics are **NDCG@10 / Recall@50, with `click` as the positive label**. That does not match what's implemented here: `evaluate.py`, `baseline_scores.json`, and this README are all built around **GAUC / nDCG@5, with `long_view` as the label**. These are not reconcilable by a config flag — different label, different k, different second metric (Recall@50 vs. GAUC) — so "improvement" means different things depending on which spec is authoritative. Flagging this now, before investing further iterations, rather than after.
+
+**Next step (pending the above):** per the README's own untested-and-ranked list, implement a ranking-aware loss (pairwise BPR, or per-user listwise softmax as a follow-up) in place of pointwise logloss in `baseline.py`'s `FM.step()`. Rationale: FM currently trains pointwise while both candidate metric families are within-user ranking metrics — a structural objective/metric mismatch that feature and capacity sweeps (already shown flat, see above) cannot fix. Lower-risk first probe given the hand-rolled numpy/no-autodiff setup; ~20s per run, no new data wiring required.
