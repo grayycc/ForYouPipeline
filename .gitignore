@@ -1,24 +1,39 @@
-# Data (downloaded from kuairand.com, not tracked)
+# Dataset, downloaded from kuairand.com. 388MB, not tracked.
 KuaiRand-Pure/
 data/
 *.tar.gz
 *.tar
+
+# Blanket CSV rule. Every CSV in this repo is either raw data or a generated submission, both
+# of which are large and regenerable. The one CSV that is a deliverable -- the final graded
+# submission -- is tracked explicitly with `git add -f` when the run finishes.
 *.csv
+
+# Secrets. .env holds a live Bedrock bearer token; .env.example is the tracked template.
+.env
+.env.*
+!.env.example
+
+# OpenAlex query cache. Machine-local and rebuilt on demand from a public API, so committing
+# it would just be a stale copy of someone else's data.
+.cache/
 
 # Python
 __pycache__/
 *.py[cod]
 .venv/
 venv/
+.pytest_cache/
+*.egg-info/
+.ipynb_checkpoints/
 
-# Secrets
-.env
-
-# Agent runs. Logs and summaries are deliverables and stay tracked; generated CSVs and
-# per-node intermediates do not. The final submission is added explicitly with `git add -f`
-# when the graded run finishes.
+# Agent runs. log.jsonl, summary.json, journal.jsonl and best_solution.py are the graded
+# deliverables and stay tracked. Per-node intermediates and generated CSVs do not.
 runs/*/nodes/
 runs/*/*.csv
+
+# Smoke runs are throwaway harness tests, not evidence of anything. Verification and graded
+# runs use their own ids and their logs stay tracked.
 runs/smoke*/
 
 # OS

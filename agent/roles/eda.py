@@ -1,0 +1,46 @@
+"""Iteration 1: one pass of data inspection, whose findings ground every later hypothesis.
+
+Runs once rather than every iteration. Figure 1 puts "inspect data" inside the loop, but the
+train split does not change, so re-measuring it 50 times would spend the scarcest resource on
+re-deriving the same numbers. The findings are cached and injected into every Planner call
+instead. Measurements EDA did not anticipate can be printed alongside a later experiment,
+which costs nothing because stdout is already fed back.
+
+Exempt from the submission and metric contract: a clean exit is success.
+"""
+from .. import config
+from . import base
+
+SYSTEM = """You are a data analyst. Reply with exactly two sections and nothing else:
+
+# Hypothesis
+One paragraph on what you intend to measure and why those measurements would change how a
+later experiment is chosen. Not a modelling hypothesis -- an analysis rationale.
+
+# Code
+One complete, standalone Python file in a single ```python block that prints its findings.
+"""
+
+
+def run(llm, iteration, journal):
+    """Returns (hypothesis, code, tokens_in, tokens_out)."""
+    prompt = f"""{base.budget_line(iteration, journal, config)}
+
+# Your task right now
+
+Write a script that inspects the data and prints what you judge most useful for choosing later
+experiments. You have one pass; its printed output is the only thing carried forward, and it
+will be shown to you at every subsequent iteration.
+
+This script is exempt from the usual contract: it takes --data_dir/--out_dir/--seed, but needs
+no submission files, no model, and no VAL_ metrics. Print findings as compact labelled lines,
+not raw dumps -- the output is truncated to about 3000 characters, so spend it deliberately.
+
+Keep the runtime modest; this costs one of your {config.MAX_ITERATIONS} iterations.
+Standard library and numpy only.
+"""
+    text, ti, to = llm.complete(SYSTEM, prompt, config.EDA_MODEL,
+                                cached_prefix=base.TASK_DESCRIPTION, role='eda')
+    from ..executor import strip_fences
+    return (base.extract_section(text, 'Hypothesis'),
+            strip_fences(base.extract_section(text, 'Code') or text), ti, to)

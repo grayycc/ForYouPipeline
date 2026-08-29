@@ -1,7 +1,15 @@
 """Agent-wide constants. Everything tunable lives here so no magic numbers hide in the loop."""
 import os
+import sys
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# The official starter kit lives in kit/ and is never modified. Putting it on sys.path keeps
+# `from data import load` working for the harness; executor.py does the same for the
+# subprocesses that run generated solutions.
+KIT_DIR = os.path.join(REPO_ROOT, 'kit')
+if KIT_DIR not in sys.path:
+    sys.path.insert(0, KIT_DIR)
 
 
 def _load_dotenv(path=os.path.join(REPO_ROOT, '.env')):
@@ -65,16 +73,44 @@ STDOUT_TAIL_CHARS = 1500
 # an unset value is an error at call time, not something quietly guessed here.
 #   AWS_BEARER_TOKEN     -- Bedrock API key
 #   AWS_REGION           -- e.g. ap-southeast-1
-#   AGENT_STRONG_MODEL   -- inference profile id used for drafts and hard debugs
-#   AGENT_FAST_MODEL     -- inference profile id used for routine improve/debug
+#   AGENT_*_MODEL        -- one inference profile id per role, listed below
 BEDROCK_API_KEY = _env('AWS_BEARER_TOKEN')
 AWS_REGION = _env('AWS_REGION')
-STRONG_MODEL = _env('AGENT_STRONG_MODEL')
-FAST_MODEL = _env('AGENT_FAST_MODEL')
+
+# One model per role, each set independently in .env so a role can be tuned without
+# disturbing the others. These are all Claude models differing in capability rather than task
+# specialisation, so choose by how hard the role's job is.
+#
+# Measured inputs to those choices:
+#   - Haiku 4.5 as the coder emitted reasoning prose inside the code fence and produced a file
+#     that would not parse. Roles that write a whole training file want a stronger model.
+#   - Prompt caching needs a prefix above a model-specific minimum: 1024 tokens on Sonnet 4.6,
+#     4096 on Haiku 4.5. The ~2.5K-token task description therefore caches on the former and
+#     silently does not on the latter.
+PLANNER_MODEL = _env('AGENT_PLANNER_MODEL')
+BASELINE_MODEL = _env('AGENT_BASELINE_MODEL')
+EDA_MODEL = _env('AGENT_EDA_MODEL')
+CODER_MODEL = _env('AGENT_CODER_MODEL')
+REVIEWER_MODEL = _env('AGENT_REVIEWER_MODEL')
+DEBUGGER_MODEL = _env('AGENT_DEBUGGER_MODEL')
+# Second debug attempt on the same branch: the cheap fix has already failed once.
+DEBUGGER_RETRY_MODEL = _env('AGENT_DEBUGGER_RETRY_MODEL')
 
 MAX_OUTPUT_TOKENS = 16000
 LLM_MAX_RETRIES = 5
 LLM_BACKOFF_BASE_S = 2.0
+
+# Literature search. OpenAlex is used rather than arXiv or Semantic Scholar: both of those
+# return HTTP 429 from this network, OpenAlex does not. The mailto puts requests in its
+# polite pool. Caps here exist to bound context growth -- the whole conversation is resent on
+# every tool round-trip, so papers are the most expensive thing the Planner can ask for.
+RESEARCH_ENABLED = True
+OPENALEX_MAILTO = _env('OPENALEX_MAILTO', 'kuairand-agent@example.com')
+RESEARCH_CACHE_DIR = os.path.join(REPO_ROOT, '.cache', 'openalex')
+MAX_SEARCHES_PER_CALL = 2
+PAPERS_PER_SEARCH = 3
+ABSTRACT_CHARS = 300
+RESEARCH_TIMEOUT_S = 25
 
 # Files the agent must never modify.
 PROTECTED_FILES = ['evaluate.py', 'submit.py', 'data.py', 'baseline.py']

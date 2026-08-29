@@ -98,6 +98,22 @@ is noise, not a result. Do not build on top of a change you have not separated f
 | `log_standard_4_08_to_4_21_pure.csv` | train window; 19 columns |
 | `log_standard_4_22_to_5_08_pure.csv` | valid+test window |
 | `log_random_4_22_to_5_08_pure.csv` | **1,186,059 rows of randomly-exposed impressions** over the valid+test window. Videos here were shown at random rather than chosen by the production recommender, so metrics computed on it are not biased by the logging policy. |
+
+**Encoding the random-exposure log consistently.** It has the same 19 columns as the standard
+logs, which means two things you must handle or its metric will not be comparable with
+validation:
+
+- **There is no `author_id` column in any log file.** `data.load()` joins it from
+  `video_features_basic_pure.csv` (`video_id -> author_id`, `'UNK'` when missing). Do the same
+  join for random-exposure rows rather than defaulting them all to `'UNK'`.
+- **`dur_bucket` is quantile-based, not fixed thresholds.** `data.encode()` derives 10 bucket
+  edges with `np.quantile` over the *training* split's `duration_ms`. Reuse those same edges;
+  inventing round-number cutoffs puts the random rows in different buckets from the rows the
+  model trained on.
+
+Its label distribution differs sharply from the standard logs — about 63% of users there have
+no positive at all, against 27% in validation — so its absolute primary is much lower. That is
+expected. What makes it useful is the comparison between your own runs, not its level.
 | `user_features_pure.csv` | 27,285 users; activity, follower/fan counts, 18 anonymised one-hot features |
 | `video_features_basic_pure.csv` | 7,583 videos; author, type, upload date/type, duration, music, tag |
 | `video_features_statistic_pure.csv` | 7,583 videos of aggregate counters (`play_cnt`, `long_time_play_cnt`, `like_cnt`, …). **These are whole-period aggregates with no time dimension — they almost certainly include the test window, so using them directly is label leakage.** |
@@ -153,20 +169,24 @@ Write **one standalone Python file** that:
    no other format is read):
 
    ```
+   TRAIN_PRIMARY=<float>
    VAL_GAUC=<float>
    VAL_NDCG5=<float>
    VAL_PRIMARY=<float>
-   ```
-
-   Optionally, if you also evaluate on the random-exposure log:
-
-   ```
    UNBIASED_PRIMARY=<float>
    ```
 
-   When present, this is used as an additional acceptance gate: a change that raises normal
-   validation while lowering the unbiased score is treated as overfitting to the logging
-   policy's own biases and is rejected.
+   All five are required.
+
+   - `TRAIN_PRIMARY` is the same `evaluate()` call applied to the **training** split. The
+     train-versus-validation gap is how overfitting to the training data becomes visible; a
+     model can improve validation while that gap widens, and you should know when it does.
+   - `UNBIASED_PRIMARY` is the primary score on `log_random_4_22_to_5_08_pure.csv`, the
+     random-exposure log, restricted to rows in the validation date window. Because those
+     impressions were shown at random rather than chosen by the production recommender,
+     metrics on them are not biased by the logging policy. It is used as an acceptance gate:
+     a change that raises normal validation while lowering the unbiased score is treated as
+     overfitting to the logging policy's own biases and is rejected.
 4. Writes both `<out_dir>/submission_valid.csv` and `<out_dir>/submission_test.csv` using
    `submit.write_submission(path, rows, scores)`, where `rows = load(data_dir)[split]` and
    `scores` is your model's score per row **in that exact row order**.

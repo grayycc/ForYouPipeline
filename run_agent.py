@@ -9,7 +9,7 @@ import datetime
 import sys
 
 from agent import config
-from agent.loop import Agent
+from agent.orchestrator import Agent
 
 
 def main():
@@ -19,8 +19,9 @@ def main():
     ap.add_argument('--seed', type=int, default=0, help='seed for the agent search policy')
     a = ap.parse_args()
 
-    print(f'run_id={a.run_id}  region={config.AWS_REGION}  '
-          f'models={config.STRONG_MODEL}/{config.FAST_MODEL}  cap={a.max_iterations}')
+    print(f'run_id={a.run_id}  region={config.AWS_REGION}  cap={a.max_iterations}')
+    for role in ('planner', 'baseline', 'eda', 'coder', 'reviewer', 'debugger'):
+        print(f'  {role:9s} {getattr(config, role.upper() + "_MODEL")}')
     agent = Agent(a.run_id, seed=a.seed)
     try:
         agent.run(max_iterations=a.max_iterations)

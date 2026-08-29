@@ -15,6 +15,7 @@ from . import config
 
 FENCE_RE = re.compile(r'^\s*```(?:python|py)?\s*\n(.*?)\n\s*```\s*$', re.DOTALL)
 METRIC_RES = {
+    'train_primary': re.compile(r'^TRAIN_PRIMARY\s*=\s*([-+0-9.eE]+)\s*$', re.MULTILINE),
     'val_gauc': re.compile(r'^VAL_GAUC\s*=\s*([-+0-9.eE]+)\s*$', re.MULTILINE),
     'val_ndcg5': re.compile(r'^VAL_NDCG5\s*=\s*([-+0-9.eE]+)\s*$', re.MULTILINE),
     'val_primary': re.compile(r'^VAL_PRIMARY\s*=\s*([-+0-9.eE]+)\s*$', re.MULTILINE),
@@ -75,17 +76,24 @@ def _limit_memory():
 
 
 def run_solution(code_path: str, out_dir: str, seed: int = 0,
-                 timeout: int = config.EXEC_TIMEOUT_S) -> dict:
-    """Run one generated solution in a subprocess. Returns a result dict; never raises."""
+                 timeout: int = config.EXEC_TIMEOUT_S,
+                 require_metrics: bool = True) -> dict:
+    """Run one generated solution in a subprocess. Returns a result dict; never raises.
+
+    `require_metrics=False` is for the EDA pass, which produces findings rather than a score:
+    a clean exit is success there, and demanding VAL_PRIMARY would mark it buggy and send it
+    to the debugger.
+    """
     os.makedirs(out_dir, exist_ok=True)
     cmd = [sys.executable, code_path,
            '--data_dir', config.DATA_DIR,
            '--out_dir', out_dir,
            '--seed', str(seed)]
     # the solution lives in its node dir, so sys.path[0] is *not* the repo root:
-    # PYTHONPATH is what lets it `from data import load`.
+    # PYTHONPATH is what lets it `from data import load` (kit/) and import our modules.
     env = dict(os.environ)
-    env['PYTHONPATH'] = config.REPO_ROOT + os.pathsep + env.get('PYTHONPATH', '')
+    env['PYTHONPATH'] = os.pathsep.join(
+        [config.KIT_DIR, config.REPO_ROOT, env.get('PYTHONPATH', '')]).rstrip(os.pathsep)
     t0 = time.time()
     try:
         p = subprocess.run(
@@ -108,7 +116,7 @@ def run_solution(code_path: str, out_dir: str, seed: int = 0,
     elif rc != 0:
         m = EXC_RE.findall(stderr)
         buggy, reason, exc = True, 'exception', (m[-1] if m else 'NonZeroExit')
-    elif 'val_primary' not in metrics:
+    elif require_metrics and 'val_primary' not in metrics:
         buggy, reason, exc = True, 'no_metric_printed', None
     else:
         buggy, reason, exc = False, '', None
@@ -127,9 +135,9 @@ def check_submission(path: str, split: str) -> tuple:
         return False, f'{os.path.basename(path)} was not created'
     try:
         p = subprocess.run(
-            [sys.executable, 'submit.py', '--check', '--split', split,
-             '--data_dir', config.DATA_DIR, path],
-            cwd=config.REPO_ROOT, capture_output=True, text=True, timeout=600,
+            [sys.executable, os.path.join(config.KIT_DIR, 'submit.py'),
+             '--check', '--split', split, '--data_dir', config.DATA_DIR, path],
+            cwd=config.KIT_DIR, capture_output=True, text=True, timeout=600,
         )
         return p.returncode == 0, trim_traceback(p.stderr or p.stdout, 600)
     except Exception as e:
