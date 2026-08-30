@@ -12,9 +12,9 @@ from agent.journal import Journal, Node
 EPS, N = 0.002, 3
 
 
-def scoring(i, primary, parent=0, op='improve'):
+def scoring(i, primary, parent=0, op='improve', accepted=True):
     n = Node(id=i, parent_id=parent, operation=op)
-    n.is_buggy, n.val_primary = False, primary
+    n.is_buggy, n.val_primary, n.accepted = False, primary, accepted
     return n
 
 
@@ -67,6 +67,31 @@ def test_crashes_interleaved_with_progress():
     j = build([scoring(0, 0.6014, None, 'baseline'), crashed(1),
                scoring(2, 0.6100), crashed(3), scoring(4, 0.6200)])
     assert not j.has_converged(EPS, N)
+
+
+# Run smoke3 scored node 4 highest (0.6019) but the unbiased-exposure gate rejected it, and
+# summary.json still named it the winner. A node the gates threw out must not be reported as
+# best, and must not become the bar later nodes are measured against.
+
+def test_rejected_node_is_not_best():
+    j = build([scoring(0, 0.6014, None, 'baseline'),
+               scoring(3, 0.6017),
+               scoring(4, 0.6019, accepted=False)])
+    assert j.best.id == 3, 'a gate-rejected node must not be reported as best'
+    assert j.best.val_primary == 0.6017
+
+
+def test_rejected_nodes_do_not_raise_the_bar():
+    """Higher-scoring nodes the gates rejected leave the run stalled, not advancing."""
+    j = build([scoring(0, 0.6014, None, 'baseline')] +
+              [scoring(i, 0.60 + 0.01 * i, accepted=False) for i in (1, 2, 3)])
+    assert j.best_history() == [0.6014] * 4, 'rejected scores must not enter the history'
+    assert j.has_converged(EPS, N), 'nothing accepted in three tries is genuine stagnation'
+
+
+def test_all_rejected_leaves_no_best():
+    j = build([scoring(0, 0.6014, None, 'baseline', accepted=False)])
+    assert j.best is None
 
 
 if __name__ == '__main__':

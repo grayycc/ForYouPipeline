@@ -24,6 +24,33 @@ from .roles import planner as planner_role
 from .roles import reviewer as reviewer_role
 
 
+def _code_diff(parent_code: str, code: str, max_chars: int = 20000) -> str:
+    """Unified diff from the parent node's solution to this one.
+
+    A required run-log field: the spec asks each iteration to record its hypothesis, the code
+    diff, the resulting metrics and any recovery events. Storing whole files instead would
+    leave a reader to spot the change themselves, which is the thing being reviewed.
+    """
+    import difflib
+    a = (parent_code or '').splitlines(keepends=True)
+    b = (code or '').splitlines(keepends=True)
+    if not a:
+        return f'(new file, {len(b)} lines)'
+    d = ''.join(difflib.unified_diff(a, b, fromfile='parent/solution.py',
+                                     tofile='solution.py', n=3))
+    if len(d) > max_chars:
+        d = d[:max_chars] + f'\n... diff truncated at {max_chars} chars'
+    return d or '(identical to parent)'
+
+
+def _read_submission_scores(path: str):
+    """The score column of a submission, in row order."""
+    import csv
+    import numpy as np
+    with open(path) as fh:
+        return np.array([float(r['score']) for r in csv.DictReader(fh)], dtype=np.float64)
+
+
 class Agent:
     def __init__(self, run_id: str, seed: int = 0):
         self.run_dir = os.path.join(config.RUNS_DIR, run_id)
@@ -34,6 +61,14 @@ class Agent:
         self.rng = random.Random(seed)
         self.t0 = time.time()
         self.converged_at = None
+        self._splits_cache = None
+
+    def _splits(self):
+        """The date-sliced data, loaded once. Needed to score an ensembled submission."""
+        if self._splits_cache is None:
+            from data import load
+            self._splits_cache = load(config.DATA_DIR)
+        return self._splits_cache
 
     def write_dummy_submissions(self):
         """Always keep a valid submission on disk, from before the first iteration."""
@@ -47,7 +82,14 @@ class Agent:
         print(f'  [safety] placeholder submissions written to {self.run_dir}')
 
     def select(self):
-        """baseline once, then EDA once, then debug a broken leaf or improve the best."""
+        """baseline, EDA, a drafting phase, then debug a broken leaf or improve the best.
+
+        Drafting comes first so that greedy improvement starts from the best of several
+        independent solutions rather than from whichever one happened to be written first.
+        Each draft explores a different region of the solution space; improvement then deepens
+        the winner. The baseline counts as the first draft -- it is a complete from-scratch
+        solution, just one whose target was given.
+        """
         j = self.journal
         if not j.has_operation('baseline'):
             return 'baseline', None
@@ -56,6 +98,8 @@ class Agent:
         eligible = [n for n in j.buggy_leaves() if n.debug_depth < config.MAX_DEBUG_DEPTH]
         if eligible and self.rng.random() < config.DEBUG_PROBABILITY:
             return 'debug', self.rng.choice(eligible)
+        if len(j.drafts) < config.MIN_DRAFTS - 1:
+            return 'draft', None
         return 'improve', j.best
 
     def step(self, iteration: int) -> Node:
@@ -109,7 +153,12 @@ class Agent:
         if not node.is_buggy:
             self._validate_submissions(node, node_dir)
 
-        if not node.is_buggy and self._worth_confirming(node):
+        # The sanity check reads the first seed, so run it before paying for the others. A node
+        # already known to be broken does not need its result confirmed to three decimal places.
+        if not node.is_buggy:
+            self._flag_implausible(node)
+
+        if not node.is_buggy:
             self._confirm_seeds(node, code_path, node_dir)
 
         node.accepted = self._accept(node)
@@ -142,8 +191,14 @@ class Agent:
         node.tokens_in, node.tokens_out = ti, to
 
     def _generate_experiment(self, node, iteration, parent):
-        """Plan, validate the plan, implement it, review it for leakage."""
-        spec, err, _, ti, to = planner_role.run(self.llm, iteration, self.journal)
+        """Plan, validate the plan, implement it, review it for leakage.
+
+        Serves both 'draft' and 'improve'. A draft has no parent, so the coder receives no
+        prior code and writes from scratch.
+        """
+        drafting = node.operation == 'draft'
+        spec, err, _, ti, to = planner_role.run(self.llm, iteration, self.journal,
+                                                drafting=drafting)
         node.tokens_in, node.tokens_out = ti, to
 
         reasons = [err] if err else []
@@ -153,7 +208,7 @@ class Agent:
         if reasons:
             print(f'  [gates] rejected: {reasons[0]}')
             spec2, err2, _, ti2, to2 = planner_role.replan(
-                self.llm, iteration, self.journal, reasons)
+                self.llm, iteration, self.journal, reasons, drafting=drafting)
             node.tokens_in += ti2
             node.tokens_out += to2
             if spec2 is not None:
@@ -221,29 +276,124 @@ class Agent:
         if node.val_primary is not None:
             node.seed_scores = [node.val_primary]
 
-    def _worth_confirming(self, node: Node) -> bool:
-        best = self.journal.best
-        if best is None:
-            return True
-        return node.val_primary > best.val_primary - config.CONFIRM_TRIGGER
+    def _flag_implausible(self, node: Node):
+        """A score under the trivial popularity rung means the code is wrong, not the idea.
+
+        Accepting one costs twice: the experiment is spent, and the planner reads it as evidence
+        the mechanism failed. Measured across four runs, the agent proposed a pairwise ranking
+        loss every time and implemented it correctly once -- so the losses were mostly bugs
+        being recorded as findings. Marking it buggy routes it to the debugger, which already
+        exists, already refuses to redesign the approach, and is capped at two attempts.
+        """
+        if node.val_primary is None or node.val_primary >= config.SANITY_FLOOR:
+            return
+        node.is_buggy = True
+        node.buggy_reason = (f'scored {node.val_primary:.4f}, below the item-popularity rung '
+                             f'{config.SANITY_FLOOR} -- a trained model cannot legitimately '
+                             f'rank worse than counting impressions, so the implementation is '
+                             f'wrong rather than the hypothesis')
+        print(f'  [sanity] {node.val_primary:.4f} is below the popularity rung '
+              f'{config.SANITY_FLOOR} -- treating as a bug, sending to the debugger')
 
     def _confirm_seeds(self, node: Node, code_path: str, node_dir: str):
-        """Re-run a promising candidate on the remaining seeds and average, so a lucky seed
-        cannot be mistaken for a gain."""
-        print(f'  [confirm] {node.val_primary:.4f} looks promising -- re-running on '
-              f'{len(config.CONFIRM_SEEDS) - 1} more seeds')
+        """Re-run a promising candidate on the remaining seeds, then combine them.
+
+        Each seed used to write over the previous seed's submission in this directory, so the
+        node reported the mean of three scores while shipping whichever model happened to run
+        last. Two models were trained and thrown away every time.
+
+        They are now kept in per-seed directories and rank-averaged into the node's submission.
+        The metric ranks rows within a user, so the score of the combined prediction is not the
+        mean of the separate scores -- each model's random error cancels against the others and
+        the combination beats every seed that went into it.
+
+        Every scoring node gets this, not only ones already close to the best. Confirming only
+        the leaders meant a single-seed challenger was compared against an ensembled incumbent
+        and measured about 0.0016 short, so the bar rose and nothing else could reach it. The
+        spec puts compute deliberately outside the binding constraints -- a run uses roughly 5%
+        of the wall-clock ceiling -- so the fair comparison is worth two extra training runs.
+        """
+        print(f'  [confirm] {node.val_primary:.4f} on seed {config.CONFIRM_SEEDS[0]} -- '
+              f'running {len(config.CONFIRM_SEEDS) - 1} more')
+
+        # Seed 0 already ran into node_dir; give it a directory of its own so it survives.
+        seed_dirs = [os.path.join(node_dir, f'seed_{config.CONFIRM_SEEDS[0]}')]
+        os.makedirs(seed_dirs[0], exist_ok=True)
+        for split in ('valid', 'test'):
+            src = os.path.join(node_dir, f'submission_{split}.csv')
+            if os.path.exists(src):
+                shutil.copy(src, os.path.join(seed_dirs[0], f'submission_{split}.csv'))
+
+        # Average the unbiased score across seeds too. It gates promotion, so comparing an
+        # ensembled model against a single seed's draw of the noisier metric rejects good nodes.
+        unbiased = [node.unbiased_val_primary] if node.unbiased_val_primary is not None else []
+
         for s in config.CONFIRM_SEEDS[1:]:
-            r = executor.run_solution(code_path, node_dir, seed=s)
+            d = os.path.join(node_dir, f'seed_{s}')
+            r = executor.run_solution(code_path, d, seed=s)
+            # Every seed's training counts. Charging only the first made exec_time roughly a
+            # third of the truth, which put the rest of the iteration in the LLM's column.
+            node.exec_time += r['exec_time']
             p = r['metrics'].get('val_primary')
             if r['is_buggy'] or p is None:
                 print(f'    seed {s}: failed ({r["buggy_reason"]}) -- excluded')
                 continue
             node.seed_scores.append(p)
-        if len(node.seed_scores) > 1:
-            node.val_primary = sum(node.seed_scores) / len(node.seed_scores)
-            node.seeds_averaged = len(node.seed_scores)
-            print(f'    seeds [{" ".join(f"{x:.4f}" for x in node.seed_scores)}] '
-                  f'-> mean {node.val_primary:.4f}')
+            seed_dirs.append(d)
+            u = r['metrics'].get('unbiased_val_primary')
+            if u is not None:
+                unbiased.append(u)
+
+        if len(unbiased) > 1:
+            node.unbiased_val_primary = sum(unbiased) / len(unbiased)
+
+        if len(node.seed_scores) < 2:
+            return
+        node.seeds_averaged = len(node.seed_scores)
+        mean = sum(node.seed_scores) / len(node.seed_scores)
+        print(f'    seeds [{" ".join(f"{x:.4f}" for x in node.seed_scores)}] -> mean {mean:.4f}')
+
+        metrics = self._ensemble_submissions(node_dir, seed_dirs)
+        if metrics is None:
+            node.val_primary = mean          # fall back to the old behaviour, and say so
+            print('    [warn] could not combine seed submissions -- reporting the mean instead')
+            return
+        node.val_primary = metrics['primary']
+        node.val_gauc, node.val_ndcg5 = metrics['GAUC'], metrics['nDCG@5']
+        node.seeds_ensembled = True
+        print(f'    ensembled {len(seed_dirs)} seeds -> {node.val_primary:.4f} '
+              f'({node.val_primary - mean:+.4f} vs the mean)')
+
+    def _ensemble_submissions(self, node_dir: str, seed_dirs):
+        """Rank-average the seeds' predictions into the node's submission. Returns the valid
+        metrics for the combined prediction, or None if the files cannot be combined.
+
+        Ranks rather than raw scores: the models emit logits on arbitrary scales, so one seed
+        with a wider spread would otherwise dominate the average.
+        """
+        import numpy as np
+        from evaluate import evaluate
+        from submit import write_submission
+
+        splits = self._splits()
+        out = {}
+        for split in ('valid', 'test'):
+            cols = []
+            for d in seed_dirs:
+                p = os.path.join(d, f'submission_{split}.csv')
+                if os.path.exists(p):
+                    cols.append(_read_submission_scores(p))
+            n = len(splits[split])
+            cols = [c for c in cols if len(c) == n]
+            if len(cols) < 2:
+                return None
+            ranks = [np.argsort(np.argsort(c)) / max(n - 1, 1) for c in cols]
+            out[split] = np.mean(ranks, axis=0)
+            write_submission(os.path.join(node_dir, f'submission_{split}.csv'),
+                             splits[split], out[split])
+
+        rows = splits['valid']
+        return evaluate([r[1] for r in rows], [r[6] for r in rows], out['valid'])
 
     def _accept(self, node: Node) -> bool:
         if node.is_buggy or node.val_primary is None:
@@ -275,8 +425,10 @@ class Agent:
 
     def _log(self, node: Node):
         spec = node.spec or {}
+        parent = self.journal.get(node.parent_id) if node.parent_id is not None else None
         rec = {
             'iter': node.id, 'parent_id': node.parent_id, 'operation': node.operation,
+            'code_diff': _code_diff(parent.code if parent else '', node.code),
             'hypothesis': node.hypothesis or spec.get('hypothesis', ''),
             'mechanism': spec.get('mechanism', ''),
             'evidence': spec.get('evidence', {}),
@@ -287,6 +439,7 @@ class Agent:
             'tags': spec.get('tags', []),
             'candidates_considered': spec.get('candidates_considered', []),
             'reflection': spec.get('reflection', '') or node.reflection,
+            'prior_failure_attribution': spec.get('prior_failure_attribution', ''),
             'gate_result': node.gate_result,
             'review_verdict': node.review_verdict, 'review_reason': node.review_reason,
             'train_primary': node.train_primary,
@@ -299,6 +452,7 @@ class Agent:
             'delta_vs_baseline': (round(node.val_primary - config.BASELINE_VALID_PRIMARY, 6)
                                   if node.val_primary is not None else None),
             'seeds_averaged': node.seeds_averaged, 'seed_scores': node.seed_scores,
+            'seeds_ensembled': node.seeds_ensembled,
             'accepted': node.accepted,
             'is_buggy': node.is_buggy, 'buggy_reason': node.buggy_reason,
             'exception_type': node.exception_type, 'recovery_action': node.recovery_action,

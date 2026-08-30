@@ -31,5 +31,7 @@ the noise floor as a successful reproduction.
     text, ti, to = llm.complete(base.CODE_SYSTEM, prompt, config.BASELINE_MODEL,
                                 cached_prefix=base.TASK_DESCRIPTION, role='baseline')
     from ..executor import strip_fences
-    return (base.extract_section(text, 'Hypothesis'),
-            strip_fences(base.extract_section(text, 'Code') or text), ti, to)
+    code = strip_fences(base.extract_section(text, 'Code') or text)
+    code, ti, to = base.retry_if_broken(llm, code, base.CODE_SYSTEM,
+                                        config.BASELINE_MODEL, 'baseline', ti, to)
+    return base.extract_section(text, 'Hypothesis'), code, ti, to

@@ -19,24 +19,58 @@ SYSTEM = """You are an ML researcher deciding the next experiment on a within-us
 Reply with exactly two sections and nothing else.
 
 # Reasoning
-First reflect on the most recent result: did it match its hypothesis, and if not was the cause
-a bug, a wrong idea, or a difference inside the noise floor? Those call for different
-responses. Then state what that rules out. Then sketch three genuinely different candidate
-experiments in one or two sentences each, and say which you are choosing and why it has the
-best expected value for one iteration.
+First reflect on the most recent result: did it match its hypothesis, and if not, why?
+
+Attributing a failure correctly is the highest-stakes judgement you make, because it decides
+what you stop trying. A mechanism and a particular implementation of it are two different
+claims. An experiment that fails may have shown the mechanism is wrong -- or only that one
+encoding of it does not work here, which a different formulation, approximation, sampling
+scheme or parameterisation might. A result inside the noise floor has shown nothing at all
+about either, and a crash has shown nothing about the idea.
+
+So do not retire a mechanism on the strength of a single implementation unless the evidence
+points at the mechanism itself. Ruling out a whole family that in fact contained the answer is
+far more expensive than one extra experiment, and it is the failure that cannot be recovered
+from later in the run. Say explicitly which you are concluding, and what evidence makes you
+confident it is that one rather than the other.
+
+Then state what is genuinely ruled out.
+
+Next, decide whether this iteration needs the literature at all.
+
+**Search when you are choosing a direction** -- opening a mechanism nothing in this run has
+tried yet. Do it *before* you settle on one, querying from the structure of the problem: the
+metric, the data shape, what the last result exposed. Searching to justify a choice already
+made yields a citation; searching before choosing can yield a candidate you would not otherwise
+have had, which is the only reason the tool is worth its cost.
+
+**Do not search when you are refining** -- tuning a parameter, changing a sampling scheme, or
+fixing an implementation of a mechanism already tested here. Say which node you are refining
+and move on. A search run out of obligation produces a paper stapled to an unrelated idea.
+
+Then sketch three candidate experiments, in one or two sentences each. Where you searched, name
+the retrieved work bearing on each candidate and what it specifically claims. Where you did
+not, or where nothing relevant came back, say so plainly. Never attach a paper to an idea it
+does not actually support: a loose citation is worse than an honest "the literature was
+silent," and it is the kind of thing a reader checks.
+
+Prefer candidates that differ in mechanism from each other, not the same mechanism applied to a
+different field. Say which you are choosing and why it has the best expected value for one
+iteration.
 
 # Spec
 A single JSON object, in a ```json block, with exactly these keys:
 
 {
   "reflection": "what the last result showed and what it rules out",
-  "candidates_considered": ["one line each for the three you weighed"],
+  "prior_failure_attribution": "if the last experiment failed: 'mechanism' | 'implementation' | 'noise' | 'bug', then one sentence on why it is that one. Empty string if the last experiment succeeded or was the baseline.",
+  "candidates_considered": ["one line each for the three you weighed, each naming the retrieved work that bears on it or saying the search surfaced nothing relevant"],
   "hypothesis": "the claim being tested, stated so it could be wrong",
   "mechanism": "why this should move the metric, in terms of how the metric is computed",
   "evidence": {
     "task_structure": "what about this task's structure supports it",
     "previous_experiments": "which prior nodes support it, by number",
-    "literature": "identifiers from search_papers, or empty if you did not search"
+    "literature": "the search_papers identifier, plus the specific claim from that abstract that bears on this experiment -- quote or paraphrase what the paper actually says, not that it merely exists. Write 'searched, nothing applicable' when that is the truth; an unsupported citation is worse than none."
   },
   "target_metric": "GAUC | nDCG@5 | both",
   "proposed_change": "the single change, concretely",
@@ -62,9 +96,12 @@ def _seen_map(journal):
     return out
 
 
-def run(llm, iteration, journal):
+def run(llm, iteration, journal, drafting: bool = False):
     """Returns (spec, error, raw_text, tokens_in, tokens_out). `spec` is None when parsing
-    failed; the orchestrator replans rather than crashing."""
+    failed; the orchestrator replans rather than crashing.
+
+    `drafting` asks for an independent solution rather than a change to the current best.
+    """
     searches = {'count': 0}
 
     def handle_tool(name, args):
@@ -76,7 +113,7 @@ def run(llm, iteration, journal):
             journal.register_citation(r)
         return research.format_results(payload, seen=_seen_map(journal))
 
-    prompt = _build_prompt(iteration, journal)
+    prompt = _build_prompt(iteration, journal, drafting=drafting)
     text, ti, to = llm.complete(
         SYSTEM, prompt, config.PLANNER_MODEL, cached_prefix=base.TASK_DESCRIPTION,
         role='planner',
@@ -89,7 +126,7 @@ def run(llm, iteration, journal):
     return spec, err, text, ti, to
 
 
-def _build_prompt(iteration, journal, extra: str = '') -> str:
+def _build_prompt(iteration, journal, extra: str = '', drafting: bool = False) -> str:
     best = journal.best
     last = journal.nodes[-1] if journal.nodes else None
 
@@ -103,18 +140,42 @@ def _build_prompt(iteration, journal, extra: str = '') -> str:
     if last is not None:
         parts.append(f'\n# Most recent result\n\n{_describe(last)}')
 
-    if best is not None and best.code:
+    # While drafting, the best solution's source is deliberately withheld. Showing it invites
+    # a variation on it, and a variation is what the improve phase is for.
+    if best is not None and best.code and not drafting:
         parts.append(f'\n# Current best solution (validation primary {best.val_primary:.4f})'
                      f'\n\n```python\n{best.code}\n```')
         if best.stdout_tail:
             parts.append(f'\nIts output:\n```\n{best.stdout_tail}\n```')
 
-    parts.append("""
+    if drafting:
+        parts.append("""
+# Your task right now
+
+Draft an **independent** solution. This is the exploration phase: you are not modifying
+anything above, you are covering a different region of the solution space so that what follows
+can build on the best of several distinct approaches instead of the first one that worked.
+
+Choose a mechanism that differs from every row of the table above in kind, not in degree -- a
+different training objective, a different model class, a different representation of the
+input. Two solutions that share a mechanism and differ in a hyperparameter are one draft, not
+two, and the second is wasted.
+
+You are opening a direction, so this is exactly the case where the literature is worth
+searching, and worth searching before you commit rather than after.
+
+Say plainly what this draft assumes that the existing attempts do not. If it scores worse than
+the current best, that is a useful result: it bounds the alternative rather than wasting the
+iteration.""")
+    else:
+        parts.append("""
 # Your task right now
 
 Decide the single next experiment. Reason from how the metrics are computed, the structure of
-this data, what previous nodes established, and -- if you judge it useful -- the published
-literature, which you can search. You are not required to search.
+this data, what previous nodes established, and -- when you are opening a new direction rather
+than refining one -- the published literature, which you can search. In that case search before
+you commit, not after: the point is to find an approach you did not already have, and a search
+run to justify a decision already made cannot do that.
 
 If a measurement would change your choice and the EDA pass did not produce it, you do not need
 a separate analysis iteration: ask for the diagnostic to be printed alongside the next
@@ -127,7 +188,7 @@ experiment, since its output comes back to you.""")
     return '\n'.join(parts)
 
 
-def replan(llm, iteration, journal, reasons):
+def replan(llm, iteration, journal, reasons, drafting: bool = False):
     """One retry after the gates reject a spec, inside the same iteration."""
     searches = {'count': 0}
 
@@ -141,7 +202,7 @@ def replan(llm, iteration, journal, reasons):
         return research.format_results(payload, seen=_seen_map(journal))
 
     detail = '\n'.join(f'- {r}' for r in reasons)
-    prompt = _build_prompt(iteration, journal, extra=detail)
+    prompt = _build_prompt(iteration, journal, extra=detail, drafting=drafting)
     text, ti, to = llm.complete(
         SYSTEM, prompt, config.PLANNER_MODEL, cached_prefix=base.TASK_DESCRIPTION,
         role='planner',
@@ -157,10 +218,16 @@ def _describe(node) -> str:
         return (f'node {node.id} ({node.operation}) FAILED: {node.buggy_reason}'
                 + (f' ({node.exception_type})' if node.exception_type else '')
                 + (f'\n\n{node.stderr_tail}' if node.stderr_tail else ''))
+    # Only val_primary is required of a solution's output, so any of the others can be absent
+    # on a node that still scored. Formatting None here would raise inside prompt building,
+    # which is outside the loop's LLM error handling and would end the run.
+    def num(x):
+        return f'{x:.4f}' if isinstance(x, (int, float)) else 'not reported'
+
     bits = [f'node {node.id} ({node.operation})']
     if node.val_primary is not None:
-        bits.append(f'validation primary {node.val_primary:.4f} '
-                    f'(GAUC {node.val_gauc:.4f}, nDCG@5 {node.val_ndcg5:.4f})')
+        bits.append(f'validation primary {num(node.val_primary)} '
+                    f'(GAUC {num(node.val_gauc)}, nDCG@5 {num(node.val_ndcg5)})')
         bits.append(f'delta vs baseline {node.val_primary - config.BASELINE_VALID_PRIMARY:+.4f}')
         if node.train_primary is not None:
             bits.append(f'train primary {node.train_primary:.4f} '

@@ -48,5 +48,7 @@ change that lets it run.
     model = config.DEBUGGER_RETRY_MODEL if node.debug_depth >= 1 else config.DEBUGGER_MODEL
     text, ti, to = llm.complete(base.CODE_SYSTEM, prompt, model,
                                 cached_prefix=base.TASK_DESCRIPTION, role='debugger')
-    return (base.extract_section(text, 'Hypothesis'),
-            strip_fences(base.extract_section(text, 'Code') or text), ti, to)
+    code = strip_fences(base.extract_section(text, 'Code') or text)
+    code, ti, to = base.retry_if_broken(llm, code, base.CODE_SYSTEM, model,
+                                        'debugger', ti, to)
+    return base.extract_section(text, 'Hypothesis'), code, ti, to

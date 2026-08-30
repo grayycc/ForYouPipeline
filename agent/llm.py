@@ -7,6 +7,11 @@ Two things here exist to control cost. The static task description is identical 
 so it sits behind an explicit cache_control breakpoint -- explicit rather than top-level
 automatic, because the legacy Bedrock integration rejects the top-level form with a 400. And
 the tool loop is capped, since every round-trip resends the whole conversation.
+
+The cap is enforced by answering the tool call with a refusal, never by removing `tools` from
+the request. Withdrawing the schema from a conversation that already contains tool_use and
+tool_result blocks leaves the model holding results it can no longer account for, and it ends
+the turn with zero content blocks. That cost five of ten iterations in run smoke10.
 """
 import random
 import time
@@ -17,6 +22,15 @@ from . import config
 
 class LLMError(RuntimeError):
     pass
+
+
+# Sent back in place of a tool result once the search budget is spent. It has to read like a
+# tool result rather than an error, because the model's next move is decided by it.
+BUDGET_SPENT = ('search budget for this call is spent -- no further searches are available. '
+                'Write your answer now, using what the earlier results gave you.')
+
+# Backstop against a model that keeps calling the tool after being told the budget is spent.
+MAX_TOOL_TURNS = 8
 
 
 class LLMClient:
@@ -79,10 +93,11 @@ class LLMClient:
         used_in = used_out = 0
         calls_made = 0
 
-        while True:
+        use_tools = bool(tools and tool_handler)
+        for turn in range(MAX_TOOL_TURNS):
             kwargs = dict(model=model, max_tokens=config.MAX_OUTPUT_TOKENS,
                           system=system_blocks, messages=messages)
-            if tools and calls_made < max_tool_calls:
+            if use_tools:
                 kwargs['tools'] = tools
 
             response = self._request(**kwargs)
@@ -91,25 +106,32 @@ class LLMClient:
             used_out += response.usage.output_tokens
 
             tool_uses = [b for b in response.content if getattr(b, 'type', None) == 'tool_use']
-            if not tool_uses or not tool_handler or calls_made >= max_tool_calls:
+            if not tool_uses:
                 text = '\n'.join(b.text for b in response.content
                                  if getattr(b, 'type', None) == 'text').strip()
                 if not text:
-                    raise LLMError('model returned no text')
+                    kinds = [getattr(b, 'type', None) for b in response.content] or ['(none)']
+                    raise LLMError(f'model returned no text: stop_reason='
+                                   f'{response.stop_reason}, blocks={kinds}')
                 return text, used_in, used_out
 
             messages.append({'role': 'assistant', 'content': response.content})
             results = []
             for block in tool_uses:
-                calls_made += 1
-                self.tool_calls += 1
-                try:
-                    out = tool_handler(block.name, block.input)
-                except Exception as e:                       # a tool must never kill the run
-                    out = f'tool failed: {type(e).__name__}: {e}'
+                if calls_made >= max_tool_calls:
+                    out = BUDGET_SPENT
+                else:
+                    calls_made += 1
+                    self.tool_calls += 1
+                    try:
+                        out = tool_handler(block.name, block.input)
+                    except Exception as e:                   # a tool must never kill the run
+                        out = f'tool failed: {type(e).__name__}: {e}'
                 results.append({'type': 'tool_result', 'tool_use_id': block.id,
                                 'content': out})
             messages.append({'role': 'user', 'content': results})
+
+        raise LLMError(f'model still calling tools after {MAX_TOOL_TURNS} turns')
 
     def _request(self, **kwargs):
         """One API call with retry. Permanent errors fail fast rather than burning wall-clock."""

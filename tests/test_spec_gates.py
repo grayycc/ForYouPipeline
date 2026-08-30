@@ -91,7 +91,54 @@ def test_duplicate_rejected():
     spec, _ = parse_spec(json.dumps(GOOD))
     ok, reasons = check_spec(spec, journal_with(spec_dict=GOOD,
                                                 registry={'W2140310134': {}}))
-    assert not ok and any('already tested' in r for r in reasons), reasons
+    assert not ok and any('already ran essentially this change' in r for r in reasons), reasons
+
+
+# The two cases the old tag-equality test could not tell apart. Run smoke3 proposed per-video
+# rate bucketing and then per-author rate bucketing back to back -- one experiment twice -- and
+# the gate waved it through because one tag differed. Meanwhile sampled pairwise and exact
+# listwise share a mechanism but are genuinely different experiments, and blocking the second
+# would have retired the family that turned out to contain the largest gain found.
+
+_RATE_TEMPLATE = {
+    'mechanism': 'gives the model an explicit quality signal beyond the embedding',
+    'proposed_change': ('compute the per-{field} long_view rate from training rows, bucket it '
+                        'into 20 quantile bins, and add it as an extra categorical field'),
+    'tags': ['target-encoding', 'feature-engineering', '{field}-statistics'],
+}
+
+
+def _rate_spec(field):
+    return dict(GOOD,
+                mechanism=_RATE_TEMPLATE['mechanism'],
+                proposed_change=_RATE_TEMPLATE['proposed_change'].format(field=field),
+                tags=[t.format(field=field) for t in _RATE_TEMPLATE['tags']],
+                evidence={})
+
+
+def test_same_mechanism_different_field_is_a_duplicate():
+    prior = _rate_spec('video')
+    spec, _ = parse_spec(json.dumps(_rate_spec('author')))
+    ok, reasons = check_spec(spec, journal_with(spec_dict=prior, registry={}))
+    assert not ok and any('already ran essentially' in r for r in reasons), reasons
+
+
+def test_same_mechanism_different_implementation_is_allowed():
+    prior = dict(GOOD, evidence={},
+                 mechanism='align the training objective with within-user ranking',
+                 proposed_change=('sample one random positive and one random negative per user '
+                                  'per minibatch and optimise the pairwise BPR log-sigmoid of '
+                                  'their score difference'),
+                 tags=['ranking-loss', 'pairwise'])
+    novel = dict(GOOD, evidence={},
+                 mechanism='align the training objective with within-user ranking',
+                 proposed_change=('replace minibatch row sampling with whole user lists and '
+                                  'apply an exact softmax cross-entropy across every impression '
+                                  'that user received, removing pair sampling entirely'),
+                 tags=['ranking-loss', 'listwise'])
+    spec, _ = parse_spec(json.dumps(novel))
+    ok, reasons = check_spec(spec, journal_with(spec_dict=prior, registry={}))
+    assert ok, f'a materially different implementation must not be blocked: {reasons}'
 
 
 def test_unregistered_citation_rejected():

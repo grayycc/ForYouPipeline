@@ -37,10 +37,13 @@ no submission files, no model, and no VAL_ metrics. Print findings as compact la
 not raw dumps -- the output is truncated to about 3000 characters, so spend it deliberately.
 
 Keep the runtime modest; this costs one of your {config.MAX_ITERATIONS} iterations.
-Standard library and numpy only.
+
+Importable here: numpy, pandas, scipy, scikit-learn, lightgbm, torch, and the standard
+library. Nothing else is installed, and an import outside that list costs the iteration.
 """
     text, ti, to = llm.complete(SYSTEM, prompt, config.EDA_MODEL,
                                 cached_prefix=base.TASK_DESCRIPTION, role='eda')
     from ..executor import strip_fences
-    return (base.extract_section(text, 'Hypothesis'),
-            strip_fences(base.extract_section(text, 'Code') or text), ti, to)
+    code = strip_fences(base.extract_section(text, 'Code') or text)
+    code, ti, to = base.retry_if_broken(llm, code, SYSTEM, config.EDA_MODEL, 'eda', ti, to)
+    return base.extract_section(text, 'Hypothesis'), code, ti, to

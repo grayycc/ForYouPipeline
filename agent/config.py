@@ -44,15 +44,45 @@ RUNS_DIR = os.path.join(REPO_ROOT, 'runs')
 MAX_ITERATIONS = 50               # hard cap per benchmark run
 WALL_CLOCK_CEILING_S = 6 * 3600   # backstop
 
-# Convergence. The README reports a seed std of 0.0008, so eps is about 2.5 sigma.
-EPSILON = 0.002
-CONVERGENCE_N = 3
+def _kit_scores():
+    """kit/baseline_scores.json, the organisers' published numbers.
+
+    Read rather than transcribed. Every figure below also appears in task_description.md for
+    the agent to read; keeping a second hand-typed copy here is how the two quietly disagree.
+    tests/test_prompts.py asserts the markdown still matches what this returns.
+    """
+    import json
+    with open(os.path.join(KIT_DIR, 'baseline_scores.json')) as fh:
+        return json.load(fh)
+
+
+_SCORES = _kit_scores()
+_S = _SCORES['scores']
+
+# Convergence, fixed by the benchmark specification -- do not tune these to buy iterations.
+# The spec notes the rule "normally triggers first", ahead of the 50-iteration cap.
+#
+# Consequence, measured across runs: the agent gets roughly four scoring experiments, and
+# unless one gains more than epsilon the run ends. That is the rule working as written, not a
+# bug -- the only legitimate way to use the full budget is to make steps larger than it, which
+# is a question of what the agent tries, not of where the threshold sits.
+EPSILON = _SCORES['convergence_rule']['epsilon']
+CONVERGENCE_N = _SCORES['convergence_rule']['N']
 
 # Reference scores to measure against.
-BASELINE_VALID_PRIMARY = 0.6016
-BASELINE_TEST_PRIMARY = 0.5946
-ORACLE_PRIMARY = 0.8645
-SEED_STD = 0.0008
+BASELINE_VALID_PRIMARY = _S['fm_official']['valid']['primary']
+BASELINE_TEST_PRIMARY = _S['fm_official']['test']['primary']
+ORACLE_PRIMARY = _S['oracle_ceiling']['test']['primary']
+SEED_STD = _S['fm_official']['std_over_5_seeds']['test_primary']
+
+# Below this a result is broken code, not a weak idea. Item popularity is the organisers' own
+# trivial rung, so a trained model landing under it has a bug. Used only by the harness -- the
+# agent is never shown it and still chooses its own experiments.
+# The validation figure, since that is the split nodes are scored on; the test-split value
+# would be the wrong bar here. Measured: a pairwise-ranking node scored below this, was
+# recorded as a legitimate negative, and the planner concluded the mechanism had failed when
+# only the implementation had.
+SANITY_FLOOR = _S['item_popularity']['valid']['primary']
 
 # Search policy.
 MIN_DRAFTS = 3                    # distinct fresh solutions before improve-only

@@ -13,11 +13,43 @@ _HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 with open(os.path.join(_HERE, 'task_description.md')) as _fh:
     TASK_DESCRIPTION = _fh.read()
 
+# Appended last to every code-writing prompt, for position rather than content. The contract
+# itself is not restated: task_description.md is the cached prefix of the same call, so a copy
+# here would put the identical instruction in one prompt twice, and the two copies would drift.
 CONTRACT_REMINDER = """
-Output contract: accept --data_dir/--out_dir/--seed; print TRAIN_PRIMARY=, VAL_GAUC=,
-VAL_NDCG5=, VAL_PRIMARY= and UNBIASED_PRIMARY= each on their own line; write
-submission_valid.csv and submission_test.csv into --out_dir; standard library and numpy only.
+Before you return the file, check it against the output contract and the library list in the
+task description above, item by item. A file that trains well and violates the contract scores
+nothing.
 """
+
+def _section(title_starts_with: str) -> str:
+    """One '## ' section of the task description, by the opening words of its heading.
+
+    Lifted from the file rather than restated here so there is a single definition of
+    anything the roles quote. Raises at import if the heading moves, since silently sending
+    an empty section is worse than failing to start.
+    """
+    out, taking = [], False
+    for line in TASK_DESCRIPTION.splitlines():
+        if line.startswith('## '):
+            if taking:
+                break
+            taking = line[3:].lstrip('0123456789. ').lower().startswith(
+                title_starts_with.lower())
+            continue
+        if taking:
+            out.append(line)
+    body = '\n'.join(out).strip()
+    if not body:
+        raise RuntimeError(f'task_description.md has no section starting '
+                           f'"{title_starts_with}" -- a role quotes it')
+    return body
+
+
+# How the metrics aggregate. Placed next to the spec in code-writing prompts because the
+# choices that go wrong -- a sampling scheme, a truncation, a per-user cap -- are made far
+# from the definition, and whether they are right depends on how the metric weights users.
+METRIC_SECTION = _section('The metric')
 
 CODE_SYSTEM = """You write complete, runnable Python for a machine-learning experiment.
 
@@ -32,6 +64,49 @@ specific about the mechanism -- "this might help" is not a hypothesis.
 One complete, standalone Python file in a single ```python block. No prose, no partial
 snippets, no diffs -- the file is written to disk and executed exactly as given.
 """
+
+
+def compiles(code: str):
+    """Returns (ok, message). Catching a syntax error before the file is executed costs one
+    cheap retry; letting it through costs the whole iteration plus a debugger call to fix
+    something trivial."""
+    try:
+        compile(code, 'solution.py', 'exec')
+        return True, ''
+    except SyntaxError as e:
+        return False, f'line {e.lineno}: {e.msg}'
+    except Exception as e:
+        return False, f'{type(e).__name__}: {e}'
+
+
+def retry_if_broken(llm, code, system, model, role, ti, to):
+    """One targeted retry quoting the syntax error.
+
+    Models sometimes write reasoning prose into the middle of the file -- "Wait, I need to
+    reconsider..." -- which is a SyntaxError on that line. Quoting the error back fixes it far
+    more reliably than rerunning the original prompt, and every role that emits a file needs
+    this, not only the coder.
+    """
+    from ..executor import strip_fences
+    ok, msg = compiles(code)
+    if ok:
+        return code, ti, to
+    print(f'  [{role}] generated file does not parse ({msg}) -- retrying once')
+    fix_prompt = f"""The file you produced is not valid Python: {msg}
+
+```python
+{code}
+```
+
+Return the corrected complete file. Emit only Python -- any commentary must be a `#` comment
+or a docstring, never bare prose, and never mid-file reconsiderations. Decide on one approach
+before writing and write only that.
+"""
+    text, ti2, to2 = llm.complete(system, fix_prompt, model,
+                                  cached_prefix=TASK_DESCRIPTION, role=role)
+    fixed = strip_fences(extract_section(text, 'Code') or text)
+    ok2, _ = compiles(fixed)
+    return (fixed if ok2 else code), ti + ti2, to + to2
 
 
 def extract_section(text: str, name: str) -> str:

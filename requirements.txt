@@ -1,2 +1,17 @@
+# The agent harness itself.
 numpy>=1.24
 anthropic>=1.0        # AnthropicBedrock client (AWS Bedrock)
+
+# Available to generated solutions. This list must stay in step with the one in
+# agent/task_description.md: the agent is told exactly what it may import, and a library named
+# there but missing here costs a whole iteration to a ModuleNotFoundError on a fresh clone.
+# The rules put any open-source library in scope, so the FM baseline is a starting point rather
+# than a constraint.
+pandas>=2.0
+scipy>=1.11
+scikit-learn>=1.3
+lightgbm>=4.0
+torch>=2.0
+
+# LightGBM needs an OpenMP runtime that pip does not ship: on macOS `brew install libomp`,
+# on Debian/Ubuntu `apt-get install libgomp1`. Without it the import raises OSError.

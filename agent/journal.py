@@ -33,6 +33,10 @@ class Node:
     unbiased_val_primary: Optional[float] = None
     seeds_averaged: int = 1
     seed_scores: List[float] = dataclasses.field(default_factory=list)
+    # True when val_primary is the score of the seeds' combined prediction rather than the mean
+    # of their separate scores. The two differ: the metric ranks rows, so averaging predictions
+    # cancels each model's random error and beats every individual seed.
+    seeds_ensembled: bool = False
 
     # execution outcome
     is_buggy: bool = True               # guilty until proven otherwise
@@ -125,15 +129,31 @@ class Journal:
         return any(n.operation == op and not n.is_buggy for n in self.nodes)
 
     @property
+    def accepted_nodes(self) -> List[Node]:
+        return [n for n in self.good_nodes if n.accepted]
+
+    @property
     def best(self) -> Optional[Node]:
-        good = self.good_nodes
-        return max(good, key=lambda n: n.score) if good else None
+        """The best *accepted* node.
+
+        Scoring highest is not enough. A node can be rejected after the fact -- by the leakage
+        reviewer, or by the unbiased-exposure gate when its validation gain does not survive on
+        randomly-exposed traffic -- and a node rejected for those reasons must not become the
+        bar that later nodes are measured against, nor be reported as the run's winner.
+        """
+        acc = self.accepted_nodes
+        return max(acc, key=lambda n: n.score) if acc else None
 
     def buggy_leaves(self) -> List[Node]:
-        """Buggy nodes nobody has tried to fix yet, still under the debug-depth cap."""
+        """Buggy nodes nobody has tried to fix yet, still under the debug-depth cap.
+
+        A node with no code is skipped: it failed before any was written, so there is nothing
+        to repair and the debugger can only invent a fresh experiment while pretending to fix
+        one. That wastes the iteration and misattributes the result.
+        """
         parents = {n.parent_id for n in self.nodes}
         return [n for n in self.nodes
-                if n.is_buggy and n.id not in parents and n.debug_depth < 3]
+                if n.is_buggy and n.code and n.id not in parents and n.debug_depth < 3]
 
     def best_history(self) -> List[float]:
         """Best-so-far validation primary after each *scoring* node, in order.
@@ -146,7 +166,11 @@ class Journal:
         for n in self.nodes:
             if n.is_buggy or n.val_primary is None:
                 continue
-            best = max(best, n.score)
+            # One entry per scoring experiment, so a run of failures still advances the
+            # convergence window -- but only an accepted node may raise the bar, matching
+            # `best`. A node the gates rejected has not moved the run forward.
+            if n.accepted:
+                best = max(best, n.score)
             out.append(best)
         return out
 

@@ -30,6 +30,10 @@ class ExperimentSpec:
     tags: List[str] = dataclasses.field(default_factory=list)
     candidates_considered: List[str] = dataclasses.field(default_factory=list)
     reflection: str = ''
+    # Which of 'mechanism' / 'implementation' / 'noise' / 'bug' the previous failure disproved.
+    # Recorded because retiring a mechanism on one bad implementation is unrecoverable: the
+    # rest of the run never revisits it, and the log should show that call being made.
+    prior_failure_attribution: str = ''
 
     def to_dict(self) -> Dict[str, Any]:
         return dataclasses.asdict(self)
@@ -122,5 +126,6 @@ def parse_spec(text: str) -> Tuple[Optional[ExperimentSpec], str]:
         tags=as_list(raw.get('tags')),
         candidates_considered=as_list(raw.get('candidates_considered')),
         reflection=as_text(raw.get('reflection')),
+        prior_failure_attribution=as_text(raw.get('prior_failure_attribution')),
     )
     return spec, ''

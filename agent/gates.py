@@ -58,9 +58,13 @@ def check_spec(spec: ExperimentSpec, journal) -> Tuple[bool, List[str]]:
     # duplicate -- do not spend a scarce iteration re-running a settled question
     dup = _find_duplicate(spec, journal)
     if dup is not None:
-        reasons.append(f'node {dup.id} already tested this '
-                       f'(tags {sorted(set(getattr(dup, "spec", {}).get("tags", [])))}); '
-                       f'propose a different change or say why the retry is warranted')
+        reasons.append(
+            f'node {dup.id} already ran essentially this change '
+            f'(tags {sorted(set(getattr(dup, "spec", {}).get("tags", [])))}). Re-testing the '
+            f'same mechanism is legitimate when the *implementation* differs materially -- a '
+            f'different approximation, sampling scheme or formulation is a genuinely new '
+            f'question. If that is what you intend, say concretely how this implementation '
+            f'differs from node {dup.id}. Otherwise propose a different mechanism.')
 
     # citations -- may only cite identifiers a real search actually returned
     registry = getattr(journal, 'citation_registry', {}) or {}
@@ -76,23 +80,41 @@ def check_spec(spec: ExperimentSpec, journal) -> Tuple[bool, List[str]]:
     return (not reasons), reasons
 
 
+def _jaccard(a: set, b: set) -> float:
+    return len(a & b) / max(len(a | b), 1) if a and b else 0.0
+
+
+# A repeat is the same mechanism carried out the same way. Tag equality was the old test and it
+# missed the obvious case: per-video rate bucketing followed by per-author rate bucketing is one
+# experiment run twice, and the tags differed by a single word so it went through.
+#
+# The implementation threshold is deliberately the binding one. Two experiments can share a
+# mechanism and still be different experiments when the encoding differs -- a sampled
+# approximation versus an exact computation is a real second question, not a repeat, and
+# retiring a mechanism on one implementation is how a good direction gets abandoned. So this
+# fires only when the *change itself* is close, not merely when the motivation is.
+_IMPL_OVERLAP = 0.60
+_TAG_OVERLAP = 0.40
+_MECH_OVERLAP = 0.50
+
+
 def _find_duplicate(spec: ExperimentSpec, journal):
-    """A prior scoring node whose tags match and whose change is near-identical."""
-    tags = {t.lower() for t in spec.tags}
-    if not tags:
+    """A prior node proposing near-identical work, judged on the change rather than the label."""
+    mine_impl = _token_set(spec.proposed_change)
+    if not mine_impl:
         return None
-    mine = _token_set(spec.proposed_change)
+    tags = {t.lower() for t in spec.tags}
+    mine_mech = _token_set(getattr(spec, 'mechanism', '') or '')
+
     for node in getattr(journal, 'nodes', []):
         prior = getattr(node, 'spec', None)
         if not prior:
             continue
-        prior_tags = {str(t).lower() for t in (prior.get('tags') or [])}
-        if not prior_tags or prior_tags != tags:
+        impl = _jaccard(mine_impl, _token_set(prior.get('proposed_change', '')))
+        if impl < _IMPL_OVERLAP:
             continue
-        theirs = _token_set(prior.get('proposed_change', ''))
-        if not mine or not theirs:
-            continue
-        overlap = len(mine & theirs) / max(len(mine | theirs), 1)
-        if overlap >= 0.7:
+        tag_sim = _jaccard(tags, {str(t).lower() for t in (prior.get('tags') or [])})
+        mech_sim = _jaccard(mine_mech, _token_set(prior.get('mechanism', '')))
+        if tag_sim >= _TAG_OVERLAP or mech_sim >= _MECH_OVERLAP:
             return node
     return None
