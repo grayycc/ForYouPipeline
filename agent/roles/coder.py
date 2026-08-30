@@ -16,29 +16,12 @@ Implement exactly the change the spec describes. Do not substitute a different i
 you think it would score better: the experiment must isolate one change so its effect can be
 attributed. If the spec cannot be implemented as written, implement the closest thing that
 runs and say so in a comment at the top of the file.
-
-On the choices the spec does not make for you.
-
-A spec fixes the mechanism, not every number. You will still have to choose batch sizes,
-epoch counts, sampling schemes, caps, truncations, normalisations, initialisations. Two rules
-govern those.
-
-**Never let such a choice change what is being optimised.** The most expensive mistake
-available to you is a default that quietly reweights the objective -- capping how many
-examples a heavy user contributes, truncating a ranked list, normalising away a magnitude the
-metric depends on. These feel like hygiene. They are not: they alter the thing being measured,
-and the result is then read as evidence about the mechanism, which retires an idea that in
-fact worked. Before fixing any quantity that controls *how much weight some group of rows
-carries*, check it against how the target metric aggregates, stated below the spec. If your
-choice disagrees with the metric, the metric wins.
-
-**Name every such choice in a comment.** For each constant, cap, threshold or sampling rule
-the spec did not specify, say in one short comment what you chose and why. An unexplained
-magic number is indistinguishable from a bug when the result is being interpreted.
-"""
+""" + base.UNSPECIFIED_CHOICES
 
 
 def _render(spec) -> str:
+    """The spec as prompt text, with the target metric's own definition appended so the
+    choices that depend on it are made next to it."""
     lines = [f'hypothesis: {spec.hypothesis}',
              f'mechanism: {spec.mechanism}',
              f'change to make: {spec.proposed_change}',
@@ -54,6 +37,7 @@ def _render(spec) -> str:
 
 
 def _retry_if_broken(llm, code, ti, to):
+    """Compile check plus one retry, using the coder's own prompt and model."""
     return base.retry_if_broken(llm, code, SYSTEM, config.CODER_MODEL, 'coder', ti, to)
 
 

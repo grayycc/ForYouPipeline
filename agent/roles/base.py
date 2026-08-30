@@ -1,10 +1,8 @@
-"""Shared pieces every role needs: the cacheable task prefix, the output contract, and the
-fence-aware response parsing.
+"""Pieces every role shares: the cacheable task prefix, the output contract, the rules for
+choices nothing specifies, and response parsing.
 
-The section parser has to be fence-aware because inside a ```python block a '#' starts a
-Python comment, not a markdown header. Treating one as a header truncates the generated file
-mid-way and strips its closing fence, which produced a SyntaxError on line 1 of every solution
-until it was fixed.
+extract_section is fence-aware because inside a ```python block a '#' starts a comment, not a
+markdown header -- treating one as a header truncates the generated file mid-way.
 """
 import os
 
@@ -20,7 +18,15 @@ CONTRACT_REMINDER = """
 Before you return the file, check it against the output contract and the library list in the
 task description above, item by item. A file that trains well and violates the contract scores
 nothing.
+
+One requirement that is not in the contract and is the most common way a file loses its own
+result: if training is iterative, the model you score and submit must be the iteration with the
+best validation primary, not whichever one the loop happened to end on. Evaluate validation each
+epoch, keep the best parameters, restore them before predicting, and print the epoch you kept.
+Nodes are ranked against each other, so a file that trains past its own optimum is not being
+compared on its hypothesis -- it is being compared on where its loop stopped.
 """
+
 
 def _section(title_starts_with: str) -> str:
     """One '## ' section of the task description, by the opening words of its heading.
@@ -51,6 +57,31 @@ def _section(title_starts_with: str) -> str:
 # from the definition, and whether they are right depends on how the metric weights users.
 METRIC_SECTION = _section('The metric')
 
+# Shared by every role that writes a training file. The choices a spec or a bug report leaves
+# open are where results are decided: a per-user cap and a missing epoch selection each moved
+# the same idea by more than 0.04, and both were read afterwards as evidence about the idea.
+UNSPECIFIED_CHOICES = """
+On the choices nothing specifies for you.
+
+A hypothesis fixes the mechanism, not every number. You will still choose batch sizes, epoch
+counts, sampling schemes, caps, truncations, normalisations, initialisations. Two rules govern
+those.
+
+**Never let such a choice change what is being optimised.** The most expensive mistake
+available to you is a default that quietly reweights the objective -- capping how many examples
+a heavy user contributes, truncating a ranked list, normalising away a magnitude the metric
+depends on. These feel like hygiene. They are not: they alter the thing being measured, and the
+result is then read as evidence about the mechanism, which retires an idea that in fact worked.
+Before fixing any quantity that controls *how much weight some group of rows carries*, check it
+against how the target metric aggregates. If your choice disagrees with the metric, the metric
+wins.
+
+**Name every such choice in a comment.** For each constant, cap, threshold or sampling rule
+nothing specified, say in one short comment what you chose and why. An unexplained magic number
+is indistinguishable from a bug when the result is being interpreted, and a later reader -- or a
+later you, fixing this file -- will not know whether it was reasoned or typed.
+"""
+
 CODE_SYSTEM = """You write complete, runnable Python for a machine-learning experiment.
 
 Reply with exactly two sections and nothing else:
@@ -63,7 +94,7 @@ specific about the mechanism -- "this might help" is not a hypothesis.
 # Code
 One complete, standalone Python file in a single ```python block. No prose, no partial
 snippets, no diffs -- the file is written to disk and executed exactly as given.
-"""
+""" + UNSPECIFIED_CHOICES
 
 
 def compiles(code: str):
@@ -133,6 +164,8 @@ def extract_section(text: str, name: str) -> str:
 
 
 def budget_line(iteration, journal, config) -> str:
+    """The header every planner prompt opens with: where the run is, what it has to beat, and
+    how large a gain has to be before it means anything."""
     best = journal.best
     best_s = f'{best.val_primary:.4f} (node {best.id})' if best else 'none yet'
     return (f'Iteration {iteration} of {config.MAX_ITERATIONS}. '
