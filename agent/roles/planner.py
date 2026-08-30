@@ -10,7 +10,7 @@ and stops the first plausible idea from winning by default.
 It holds the search tool. It is not told which methods to consider -- identifying what is
 worth trying, and why, is the work being graded.
 """
-from .. import config, research
+from .. import config, diagnose, research
 from ..spec import parse_spec
 from . import base
 
@@ -36,7 +36,7 @@ A single JSON object, in a ```json block, with exactly these keys:
   "evidence": {
     "task_structure": "what about this task's structure supports it",
     "previous_experiments": "which prior nodes support it, by number",
-    "literature": "identifiers from search_papers, or empty if you did not search"
+    "literature": "if you searched: the bracketed ids you actually read, and in one clause what each contributed -- including 'read, did not support this' where that is the honest answer. Empty ONLY if you ran no search this iteration."
   },
   "target_metric": "GAUC | nDCG@5 | both",
   "proposed_change": "the single change, concretely",
@@ -109,12 +109,48 @@ def _build_prompt(iteration, journal, extra: str = '') -> str:
         if best.stdout_tail:
             parts.append(f'\nIts output:\n```\n{best.stdout_tail}\n```')
 
+    ruled_out = diagnose.ruled_out_block(journal)
+    if ruled_out:
+        parts.append(f'\n{ruled_out}')
+
+    coverage = diagnose.stack_coverage(journal)
+    if coverage:
+        parts.append(f'\n{coverage}')
+
+    calibration = diagnose.calibration_block(journal)
+    if calibration:
+        parts.append(f'\n{calibration}')
+
+    # Papers retrieved on earlier iterations, with what came of them. runs/v5 ran 19 searches
+    # and surfaced 42 papers, and 18 of its 19 nodes recorded no literature at all: each
+    # iteration searched from scratch inside its own tool loop and the results died with it.
+    # Carrying the registry forward makes the reading list cumulative, and shows which papers
+    # have already been acted on so a search is not silently repeated.
+    reg = getattr(journal, 'citation_registry', {}) or {}
+    if reg:
+        rows = [f'- [{pid}] {m.get("title", "")[:110]}'
+                + (f' -- ALREADY USED: {m["used_in"]}' if m.get('used_in') else ' -- not yet used')
+                for pid, m in list(reg.items())[:20]]
+        parts.append('\n# Papers already retrieved this run\n\n'
+                     'Cumulative across iterations. You may cite these by id without searching '
+                     'again; search when you need something they do not cover.\n\n'
+                     + '\n'.join(rows))
+
     parts.append("""
 # Your task right now
 
 Decide the single next experiment. Reason from how the metrics are computed, the structure of
 this data, what previous nodes established, and -- if you judge it useful -- the published
 literature, which you can search. You are not required to search.
+
+Read the diagnosis column before concluding anything from a score. A node marked `under_trained`
+did not test its hypothesis at all -- its low score says the optimisation failed, not that the
+idea is wrong, and treating the two the same way abandons directions that were never tried. A
+node marked `overfit` fit the training data and failed to generalise, which points at the
+feature's sparsity rather than at the mechanism behind it.
+
+Whatever you change must live inside the standalone solution file itself, including any feature
+logic, computed from train-only history when relevant.
 
 If a measurement would change your choice and the EDA pass did not produce it, you do not need
 a separate analysis iteration: ask for the diagnostic to be printed alongside the next
@@ -159,8 +195,16 @@ def _describe(node) -> str:
                 + (f'\n\n{node.stderr_tail}' if node.stderr_tail else ''))
     bits = [f'node {node.id} ({node.operation})']
     if node.val_primary is not None:
-        bits.append(f'validation primary {node.val_primary:.4f} '
-                    f'(GAUC {node.val_gauc:.4f}, nDCG@5 {node.val_ndcg5:.4f})')
+        # Each component is formatted only if present. The guard tests val_primary but the line
+        # then formatted val_gauc and val_ndcg5 as well, so a node carrying a primary score
+        # without its components raised TypeError here -- inside the prompt builder, which runs
+        # every iteration.
+        parts = [f'validation primary {node.val_primary:.4f}']
+        comps = [f'{k} {v:.4f}' for k, v in (('GAUC', node.val_gauc),
+                                             ('nDCG@5', node.val_ndcg5)) if v is not None]
+        if comps:
+            parts.append(f'({", ".join(comps)})')
+        bits.append(' '.join(parts))
         bits.append(f'delta vs baseline {node.val_primary - config.BASELINE_VALID_PRIMARY:+.4f}')
         if node.train_primary is not None:
             bits.append(f'train primary {node.train_primary:.4f} '

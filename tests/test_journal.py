@@ -12,9 +12,16 @@ from agent.journal import Journal, Node
 EPS, N = 0.002, 3
 
 
-def scoring(i, primary, parent=0, op='improve'):
+def scoring(i, primary, parent=0, op='improve', accepted=True):
+    """A node that ran and scored.
+
+    `accepted` defaults True because best_history tracks the accepted best: in the real loop a
+    node that raises the best-so-far is accepted by definition, and marking a non-improving one
+    accepted changes nothing, since the history is a running max. Rejection is exercised
+    explicitly in tests/test_diagnose.py.
+    """
     n = Node(id=i, parent_id=parent, operation=op)
-    n.is_buggy, n.val_primary = False, primary
+    n.is_buggy, n.val_primary, n.accepted = False, primary, accepted
     return n
 
 
@@ -75,3 +82,20 @@ if __name__ == '__main__':
             fn()
             print(f'  PASS  {name}')
     print('\nall journal tests passed')
+
+
+def test_floor_blocks_convergence_during_warm_up():
+    """The same four flat nodes that are genuine stagnation late in a run are just the
+    ordinary early state of a search. The floor is what separates the two cases, and it was
+    ending every real run at iteration 4 of 50 before it existed."""
+    j = build([scoring(0, 0.6014, None, 'baseline'),
+               scoring(1, 0.6015), scoring(2, 0.6016), scoring(3, 0.6018)])
+    assert j.has_converged(EPS, N), 'unchanged with no floor'
+    assert not j.has_converged(EPS, N, min_scoring_nodes=15), 'floor must suppress it'
+
+
+def test_floor_still_allows_convergence_once_met():
+    nodes = [scoring(0, 0.6014, None, 'baseline')]
+    nodes += [scoring(i, 0.6015) for i in range(1, 16)]
+    j = build(nodes)
+    assert j.has_converged(EPS, N, min_scoring_nodes=15), 'floor cleared, rule applies'

@@ -11,14 +11,16 @@ import json
 import os
 import random
 import shutil
+import statistics
 import time
 
-from . import config, executor, gates
+from . import config, diagnose, executor, gates
 from .journal import Journal, Node
 from .llm import LLMClient, LLMError
 from .roles import baseline as baseline_role
 from .roles import coder as coder_role
 from .roles import debugger as debugger_role
+from .roles import draft as draft_role
 from .roles import eda as eda_role
 from .roles import planner as planner_role
 from .roles import reviewer as reviewer_role
@@ -32,8 +34,9 @@ class Agent:
         self.journal = Journal()
         self.llm = LLMClient()
         self.rng = random.Random(seed)
-        self.t0 = time.time()
+        self.t0 = time.monotonic()
         self.converged_at = None
+        self.refit_status = 'not attempted'
 
     def write_dummy_submissions(self):
         """Always keep a valid submission on disk, from before the first iteration."""
@@ -47,19 +50,57 @@ class Agent:
         print(f'  [safety] placeholder submissions written to {self.run_dir}')
 
     def select(self):
-        """baseline once, then EDA once, then debug a broken leaf or improve the best."""
+        """baseline once, then EDA once, then a few fresh drafts, then debug or improve.
+
+        The drafts matter: `improve` always branches from the incumbent, so without them the
+        search can only ever mutate the first working solution. Fourteen consecutive iterations
+        of runs/v2 were variations on one FM script for exactly this reason, which no amount of
+        better prompting can fix -- a different model class has to start from a blank file.
+        """
         j = self.journal
         if not j.has_operation('baseline'):
             return 'baseline', None
         if not j.has_operation('eda'):
             return 'eda', None
+        if len(j.drafts) < config.MIN_DRAFTS:
+            return 'draft', None
+        if self._stalled():
+            print(f'  [stall] {config.STALL_NOISE_STREAK} consecutive results inside the noise '
+                  f'floor -- drafting instead of editing the incumbent again')
+            return 'draft', None
         eligible = [n for n in j.buggy_leaves() if n.debug_depth < config.MAX_DEBUG_DEPTH]
         if eligible and self.rng.random() < config.DEBUG_PROBABILITY:
             return 'debug', self.rng.choice(eligible)
         return 'improve', j.best
 
+    def _stalled(self) -> bool:
+        """Have the last few scoring results all landed inside the noise floor?
+
+        Crashes and the EDA pass are skipped rather than breaking the streak -- they carry no
+        information about whether the incumbent's neighbourhood is exhausted. A `regression` or
+        `overfit` does break it: those are informative failures that point somewhere, unlike a
+        result that could not be distinguished from the incumbent at all.
+        """
+        j = self.journal
+        if len(j.drafts) >= config.MAX_DRAFTS:
+            return False
+        recent_draft = any(n.operation == 'draft'
+                           for n in j.nodes[-config.STALL_DRAFT_COOLDOWN:])
+        if recent_draft:
+            return False
+        streak = 0
+        for n in reversed(j.nodes):
+            if n.is_buggy or n.val_primary is None:
+                continue
+            if diagnose.classify(n, j) != diagnose.NOISE:
+                break
+            streak += 1
+            if streak >= config.STALL_NOISE_STREAK:
+                return True
+        return False
+
     def step(self, iteration: int) -> Node:
-        t_iter = time.time()
+        t_iter = time.monotonic()
         op, parent = self.select()
         print(f'\n=== iteration {iteration} | {op}'
               f'{f" from node {parent.id}" if parent else ""} ===')
@@ -72,6 +113,8 @@ class Agent:
                 self._generate_baseline(node, iteration)
             elif op == 'eda':
                 self._generate_eda(node, iteration)
+            elif op == 'draft':
+                self._generate_draft(node, iteration)
             elif op == 'debug':
                 self._generate_debug(node, iteration, parent)
             else:
@@ -80,7 +123,7 @@ class Agent:
             node.is_buggy, node.buggy_reason = True, 'llm_failure'
             node.exception_type, node.stderr_tail = 'LLMError', str(e)
             node.recovery_action = 'fall back to the best node next iteration'
-            node.wall_seconds = time.time() - t_iter
+            node.wall_seconds = time.monotonic() - t_iter
             self.journal.append(node)
             self._log(node)
             print(f'  -> LLM FAILURE: {e}')
@@ -112,6 +155,14 @@ class Agent:
         if not node.is_buggy and self._worth_confirming(node):
             self._confirm_seeds(node, code_path, node_dir)
 
+        # Every multi-seed node is another free measurement of the unbiased metric's noise, so
+        # the gate's tolerance is re-pooled after each one rather than fixed by the baseline's
+        # first three draws.
+        if not node.is_buggy and len(node.seed_unbiased_scores or []) > 1:
+            self._calibrate_unbiased_tolerance(node)
+        elif self.journal.unbiased_tolerance is None:
+            self._calibrate_unbiased_tolerance(node)
+
         node.accepted = self._accept(node)
         if node.accepted:
             self._promote(node, node_dir)
@@ -120,7 +171,7 @@ class Agent:
         return node
 
     def _finish(self, node, t_iter):
-        node.wall_seconds = time.time() - t_iter
+        node.wall_seconds = time.monotonic() - t_iter
         self.journal.append(node)
         self.journal.note_citation_outcome(node)
         self._log(node)
@@ -135,11 +186,76 @@ class Agent:
         node.hypothesis, node.code, ti, to = eda_role.run(self.llm, iteration, self.journal)
         node.tokens_in, node.tokens_out = ti, to
 
+    def _generate_draft(self, node, iteration):
+        from .spec import ExperimentSpec
+
+        node.hypothesis, tags, node.code, ti, to = draft_role.run(
+            self.llm, iteration, self.journal)
+        node.tokens_in, node.tokens_out = ti, to
+
+        # A draft that restates a mechanism the run has already refuted is the most expensive
+        # way to learn nothing, and it is what runs/v5 did four times over. One redraft, told
+        # exactly which node it collided with, is far cheaper than the wasted iteration.
+        dup = gates._find_duplicate(ExperimentSpec(tags=tags), self.journal)
+        if dup is not None and tags:
+            print(f'  [gate] draft repeats the mechanism of node {dup.id} (tags {tags}) '
+                  f'-- redrafting once')
+            node.gate_result = f'redrafted away from node {dup.id}'
+            avoid = (f'Your first attempt proposed {tags}, which is the mechanism node '
+                     f'{dup.id} already tested. Choose a different one.')
+            h2, t2, c2, ti2, to2 = draft_role.run(self.llm, iteration, self.journal, avoid=avoid)
+            node.tokens_in += ti2
+            node.tokens_out += to2
+            if c2.strip():
+                node.hypothesis, tags, node.code = h2, t2, c2
+        else:
+            node.gate_result = 'passed'
+
+        # The draft's own tags go on the node, so it is visible to the gate as prior work later.
+        node.spec = {'tags': tags, 'proposed_change': node.hypothesis or '',
+                     'mechanism': '', 'hypothesis': node.hypothesis or ''}
+
+        # Drafts were skipping the leakage review entirely, which is backwards: a draft is
+        # written from scratch, so it is *more* likely to reinvent a leaky target encoding than
+        # an improve that inherits a reviewed solution. A leaky draft that happened to score
+        # well could have become the submission with nothing to stop it.
+        from .spec import ExperimentSpec
+        stand_in = ExperimentSpec(proposed_change=node.hypothesis or 'a fresh solution',
+                                  risks={'leakage': 'not assessed -- this is a draft'})
+        verdict, reason = self._review(node, node.code, stand_in)
+        node.review_verdict, node.review_reason = verdict, reason
+        if verdict == 'LEAK':
+            print(f'  [review] leakage confirmed in draft: {reason[:120]}')
+
     def _generate_debug(self, node, iteration, parent):
         node.spec = parent.spec
         node.hypothesis, node.code, ti, to = debugger_role.run(
             self.llm, iteration, self.journal, parent)
         node.tokens_in, node.tokens_out = ti, to
+
+    def _review(self, node, code, spec, parent_code=None):
+        """Leakage verdict, confirmed before it is allowed to block anything.
+
+        The reviewer is a stochastic judge making a decision that costs a whole iteration, and
+        measurement says a single sample is not safe in either direction: re-reviewing runs/v4's
+        flagged nodes, three false positives repeated across samples while a genuine leak came
+        back CLEAN one time in two. Requiring two LEAKs in a row costs one extra call only on
+        nodes that were going to be flagged anyway, and turns a coin-flip into a decision.
+
+        Returns (verdict, reason) and accumulates token counts onto the node.
+        """
+        verdict, reason, ti, to = reviewer_role.run(self.llm, code, spec, parent_code)
+        node.tokens_in += ti
+        node.tokens_out += to
+        if verdict != 'LEAK':
+            return verdict, reason
+        confirm, reason2, ti2, to2 = reviewer_role.run(self.llm, code, spec, parent_code)
+        node.tokens_in += ti2
+        node.tokens_out += to2
+        if confirm != 'LEAK':
+            print('  [review] leakage flagged once but not on confirmation -- treating as clean')
+            return 'CLEAN', ''
+        return 'LEAK', (reason2 or reason)
 
     def _generate_experiment(self, node, iteration, parent):
         """Plan, validate the plan, implement it, review it for leakage."""
@@ -179,18 +295,14 @@ class Agent:
         node.tokens_in += ti3
         node.tokens_out += to3
 
-        verdict, reason, ti4, to4 = reviewer_role.run(self.llm, node.code, spec)
-        node.tokens_in += ti4
-        node.tokens_out += to4
+        verdict, reason = self._review(node, node.code, spec, parent_code)
         node.review_verdict, node.review_reason = verdict, reason
         if verdict == 'LEAK':
-            print(f'  [review] leakage flagged: {reason[:120]}')
+            print(f'  [review] leakage confirmed: {reason[:120]}')
             node.code, ti5, to5 = coder_role.revise(self.llm, spec, node.code, reason)
             node.tokens_in += ti5
             node.tokens_out += to5
-            verdict2, reason2, ti6, to6 = reviewer_role.run(self.llm, node.code, spec)
-            node.tokens_in += ti6
-            node.tokens_out += to6
+            verdict2, reason2 = self._review(node, node.code, spec, parent_code)
             node.review_verdict, node.review_reason = verdict2, reason2
             if verdict2 == 'LEAK':
                 print('  [review] still flagged -- will run, but cannot become best')
@@ -220,12 +332,34 @@ class Agent:
         node.exec_time = res['exec_time']
         if node.val_primary is not None:
             node.seed_scores = [node.val_primary]
+        if node.unbiased_val_primary is not None:
+            node.seed_unbiased_scores = [node.unbiased_val_primary]
+
+        # A generated solution that stubs UNBIASED_PRIMARY out with the validation score defeats
+        # the acceptance gate silently -- runs/v2 node 5 shipped exactly that, comment included,
+        # and passed every check. The two are computed on different row sets, so they cannot
+        # legitimately be bit-identical.
+        if (not node.is_buggy and node.val_primary is not None
+                and node.unbiased_val_primary is not None
+                and abs(node.unbiased_val_primary - node.val_primary) < 1e-9):
+            node.is_buggy, node.buggy_reason = True, 'unbiased_is_stub'
+            node.stderr_tail = (
+                'UNBIASED_PRIMARY is bit-identical to VAL_PRIMARY, so it was not computed on the '
+                'random-exposure log. Compute it on log_random_4_22_to_5_08_pure.csv restricted '
+                'to the validation date window, as the task description requires.'
+            ).strip()
 
     def _worth_confirming(self, node: Node) -> bool:
+        """Spend the extra seeds on anything that could still be accepted.
+
+        The window is a full epsilon rather than CONFIRM_TRIGGER because the tie-break in
+        _accept can promote a node up to epsilon below the incumbent. A node accepted on one
+        seed would defeat the point of seed-averaging entirely.
+        """
         best = self.journal.best
         if best is None:
             return True
-        return node.val_primary > best.val_primary - config.CONFIRM_TRIGGER
+        return node.val_primary > best.val_primary - config.EPSILON
 
     def _confirm_seeds(self, node: Node, code_path: str, node_dir: str):
         """Re-run a promising candidate on the remaining seeds and average, so a lucky seed
@@ -239,11 +373,58 @@ class Agent:
                 print(f'    seed {s}: failed ({r["buggy_reason"]}) -- excluded')
                 continue
             node.seed_scores.append(p)
+            # The unbiased score is averaged over the same seeds. Leaving it at the seed-0 value
+            # while averaging validation compares a noisy number against a smoothed one, and the
+            # gate then rejects on noise -- which is what happened to every candidate in v2.
+            u = r['metrics'].get('unbiased_val_primary')
+            if u is not None:
+                node.seed_unbiased_scores.append(u)
         if len(node.seed_scores) > 1:
             node.val_primary = sum(node.seed_scores) / len(node.seed_scores)
             node.seeds_averaged = len(node.seed_scores)
             print(f'    seeds [{" ".join(f"{x:.4f}" for x in node.seed_scores)}] '
                   f'-> mean {node.val_primary:.4f}')
+        if len(node.seed_unbiased_scores) > 1:
+            node.unbiased_val_primary = (sum(node.seed_unbiased_scores)
+                                         / len(node.seed_unbiased_scores))
+            print(f'    unbiased [{" ".join(f"{x:.4f}" for x in node.seed_unbiased_scores)}] '
+                  f'-> mean {node.unbiased_val_primary:.4f}')
+
+    def _calibrate_unbiased_tolerance(self, node: Node = None):
+        """Pool the within-node seed spread across every node that has run multiple seeds.
+
+        This was calibrated from the baseline node alone, on the reasoning that its three seeds
+        are a free measurement of the metric's noise. Three samples is simply too few to
+        estimate a standard deviation with: the baseline drew a narrow triple (sigma 0.00134)
+        while the pooled estimate over runs/v3 and v5 -- 18 nodes, 36 degrees of freedom -- is
+        0.00215. The gate was therefore 60% tighter than the noise it was meant to sit above,
+        and in v5 it vetoed node 18 on a drop of 0.0035 against a 0.0034 tolerance, which is a
+        coin flip dressed as a decision.
+
+        Pooling within-node deviations (not the spread of node means, which carries real
+        between-model differences) re-estimates the same quantity from every seed the run has
+        already paid for, and tightens as the run goes on. Recalculated after each multi-seed
+        node rather than once, so a run is not stuck with whatever the first three draws said.
+        """
+        # The current node is not in the journal yet -- _finish appends it after _accept runs --
+        # so it is folded in explicitly rather than waiting a whole iteration to count.
+        groups = [n.seed_unbiased_scores for n in self.journal.nodes
+                  if len(n.seed_unbiased_scores or []) > 1]
+        if node is not None and len(node.seed_unbiased_scores or []) > 1:
+            groups.append(node.seed_unbiased_scores)
+        dof = sum(len(g) - 1 for g in groups)
+        if dof >= 2:
+            ss = sum((x - statistics.mean(g)) ** 2 for g in groups for x in g)
+            sigma = (ss / dof) ** 0.5
+            tol = max(config.UNBIASED_TOLERANCE_SIGMAS * sigma, config.SEED_STD)
+            got = f'pooled sigma {sigma:.5f} over {len(groups)} nodes, {dof} dof'
+        else:
+            tol = config.UNBIASED_TOLERANCE_DEFAULT
+            got = 'no spread measured yet'
+        prev = self.journal.unbiased_tolerance
+        self.journal.unbiased_tolerance = tol
+        if prev is None or abs(prev - tol) > 1e-6:
+            print(f'  [calibrate] unbiased gate tolerance {tol:.5f} ({got})')
 
     def _accept(self, node: Node) -> bool:
         if node.is_buggy or node.val_primary is None:
@@ -254,14 +435,32 @@ class Agent:
         best = self.journal.best
         if best is None:
             return True
-        if node.val_primary <= best.val_primary:
+
+        # One question, asked once: does this outrank the incumbent? rank_key is the validation
+        # score, because that is the checkpoint the challenge says it will score.
+        if not self.journal.outranks_best(node):
             return False
-        # Reject gains that exist only on policy-biased traffic.
-        if node.unbiased_val_primary is not None and best.unbiased_val_primary is not None:
-            if node.unbiased_val_primary < best.unbiased_val_primary - config.SEED_STD:
+
+        # Then the veto. The unbiased gate asks whether THIS change traded genuine preference
+        # signal for logging-policy artifacts, which is a question about the parent->child delta.
+        # Measuring it against the global best instead compares across model families, and those
+        # differ in unbiased level by far more than any single change does: in runs/v3 the gap
+        # between GBDT-style and FM-style solutions was 0.047 against a 0.0092 tolerance, five
+        # times too wide. So the gate could only ever fire on a change of family and never within
+        # one -- and it rejected nothing at all across 18 iterations. The parent shares the
+        # lineage, so the family offset cancels and the tolerance means what it was calibrated
+        # to mean. It falls back to the incumbent only when the parent has no unbiased score.
+        ref = self.journal.get(node.parent_id) if node.parent_id is not None else None
+        if ref is None or ref.unbiased_val_primary is None:
+            ref = best
+        tol = self.journal.unbiased_tolerance or config.UNBIASED_TOLERANCE_DEFAULT
+        if node.unbiased_val_primary is not None and ref.unbiased_val_primary is not None:
+            drop = ref.unbiased_val_primary - node.unbiased_val_primary
+            if drop > tol:
                 node.recovery_action = 'rejected by the unbiased-exposure gate'
-                print('  [gate] validation rose but random-exposure fell -- rejected as '
-                      'overfitting to the logging policy')
+                print(f'  [gate] validation rose but random-exposure fell {drop:.4f} vs node '
+                      f'{ref.id} (tolerance {tol:.4f}) -- rejected as overfitting to the '
+                      f'logging policy')
                 return False
         return True
 
@@ -298,7 +497,9 @@ class Agent:
             'unbiased_val_primary': node.unbiased_val_primary,
             'delta_vs_baseline': (round(node.val_primary - config.BASELINE_VALID_PRIMARY, 6)
                                   if node.val_primary is not None else None),
+            'diagnosis': diagnose.classify(node, self.journal),
             'seeds_averaged': node.seeds_averaged, 'seed_scores': node.seed_scores,
+            'seed_unbiased_scores': node.seed_unbiased_scores,
             'accepted': node.accepted,
             'is_buggy': node.is_buggy, 'buggy_reason': node.buggy_reason,
             'exception_type': node.exception_type, 'recovery_action': node.recovery_action,
@@ -328,11 +529,12 @@ class Agent:
         max_iterations = max_iterations or config.MAX_ITERATIONS
         self.write_dummy_submissions()
         for i in range(max_iterations):
-            if time.time() - self.t0 > config.WALL_CLOCK_CEILING_S:
+            if time.monotonic() - self.t0 > config.WALL_CLOCK_CEILING_S:
                 print('\n[stop] wall-clock ceiling reached')
                 break
             self.step(i)
-            if self.journal.has_converged(config.EPSILON, config.CONVERGENCE_N):
+            if self.journal.has_converged(config.EPSILON, config.CONVERGENCE_N,
+                                          config.MIN_ITERATIONS_BEFORE_CONVERGENCE):
                 self.converged_at = i
                 print(f'\n[stop] converged at iteration {i}: validation primary has not '
                       f'improved by >{config.EPSILON} over {config.CONVERGENCE_N} '
@@ -340,7 +542,52 @@ class Agent:
                 break
         else:
             print(f'\n[stop] iteration cap ({max_iterations}) reached')
+        self.final_refit()
         self.write_summary()
+
+    def final_refit(self):
+        """Refit the winning configuration on train+valid and regenerate the test submission.
+
+        The test window (04-29 to 05-08) directly follows validation, so the winning config
+        trained on train+valid sees a week of more recent data than the one trained on train
+        alone. This cannot be measured on validation -- validation is inside the training set
+        once it is done -- which is exactly why a validation-driven search will never propose
+        it: there is no gradient toward a change the objective cannot see.
+
+        The scored, reported result stays the validation-best checkpoint. Only the test
+        submission is regenerated, and only if the refit actually produces a valid one; any
+        failure leaves the original in place, since a worse-but-valid submission beats a
+        missing one.
+        """
+        best = self.journal.best
+        solution = os.path.join(self.run_dir, 'best_solution.py')
+        if best is None or not os.path.exists(solution):
+            print('\n[refit] no best solution on disk -- skipped')
+            self.refit_status = 'skipped: no best solution'
+            return
+
+        print(f'\n[refit] retraining node {best.id} on train+valid for the test submission')
+        out_dir = os.path.join(self.run_dir, 'final_refit')
+        res = executor.run_solution(solution, out_dir, seed=config.CONFIRM_SEEDS[0],
+                                    require_metrics=False,
+                                    extra_args=['--train_split', 'train+valid'])
+        if res['is_buggy']:
+            print(f'  -> refit failed ({res["buggy_reason"]}) -- keeping the train-only '
+                  f'submission')
+            self.refit_status = f'failed: {res["buggy_reason"]}'
+            return
+
+        src = os.path.join(out_dir, 'submission_test.csv')
+        ok, msg = executor.check_submission(src, 'test')
+        if not ok:
+            print(f'  -> refit submission failed --check ({msg[:120]}) -- keeping the '
+                  f'train-only submission')
+            self.refit_status = 'failed: invalid submission'
+            return
+
+        shutil.copy(src, os.path.join(self.run_dir, 'best_submission_test.csv'))
+        print('  -> test submission regenerated from the train+valid refit')
+        self.refit_status = 'applied'
 
     def write_summary(self):
         best = self.journal.best
@@ -349,6 +596,9 @@ class Agent:
             'iterations_used': len(self.journal),
             'iteration_cap': config.MAX_ITERATIONS,
             'converged_at_iteration': self.converged_at,
+            'convergence_epsilon': config.EPSILON,
+            'convergence_n': config.CONVERGENCE_N,
+            'min_iterations_before_convergence': config.MIN_ITERATIONS_BEFORE_CONVERGENCE,
             'manual_interventions': 0,
             'total_tokens_in': self.llm.total_in,
             'total_tokens_out': self.llm.total_out,
@@ -357,7 +607,7 @@ class Agent:
             'cache_write_tokens': self.llm.cache_writes,
             'literature_searches': self.llm.tool_calls,
             'papers_seen': len(self.journal.citation_registry),
-            'agent_wall_clock_seconds': round(time.time() - self.t0, 1),
+            'agent_wall_clock_seconds': round(time.monotonic() - self.t0, 1),
             'gpu_hours': 0.0,
             'buggy_nodes': sum(1 for n in self.journal.nodes if n.is_buggy),
             # Selection pressure: the best of N noisy estimates is partly luck, so the count
@@ -370,6 +620,11 @@ class Agent:
             'best_valid_ndcg5': best.val_ndcg5 if best else None,
             'best_train_primary': best.train_primary if best else None,
             'best_unbiased_primary': best.unbiased_val_primary if best else None,
+            'unbiased_gate_tolerance': self.journal.unbiased_tolerance,
+            'draft_nodes': len(self.journal.drafts),
+            # The reported score is the validation-best checkpoint; this says whether the test
+            # submission on disk was regenerated from a train+valid refit of that same config.
+            'final_refit_train_plus_valid': self.refit_status,
             'delta_vs_baseline': (round(best.val_primary - config.BASELINE_VALID_PRIMARY, 6)
                                   if best else None),
             'best_seeds_averaged': best.seeds_averaged if best else None,

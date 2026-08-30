@@ -124,3 +124,63 @@ if __name__ == '__main__':
             fn()
             print(f'  PASS  {name}')
     print('\nall spec/gate tests passed')
+
+
+def test_same_mechanism_different_join_key_is_a_duplicate():
+    """runs/v2 nodes 8/11/16 were one mechanism -- a sparse per-(user, X) label rate -- with
+    three join keys. Exact tag-set equality let all three through as distinct experiments."""
+    prior = Node(id=8, parent_id=0, operation='improve')
+    prior.is_buggy, prior.val_primary = False, 0.5698
+    prior.spec = {
+        'tags': ['user-category-affinity', 'personalization', 'feature-engineering', 'FM'],
+        'proposed_change': 'compute per-user historical positive rate per category from '
+                           'training rows and add it as a bucketed FM feature column',
+    }
+    j = Journal()
+    j.append(prior)
+
+    spec = dict(GOOD)
+    spec['tags'] = ['user-tag-affinity', 'personalization', 'feature-engineering', 'FM']
+    spec['proposed_change'] = ('compute per-user historical positive rate per tag from '
+                               'training rows and add it as a bucketed FM feature column')
+    parsed, err = parse_spec(json.dumps(spec))
+    assert parsed is not None, err
+    ok, reasons = check_spec(parsed, j)
+    assert not ok and any('already tested' in r for r in reasons), reasons
+
+
+def test_the_same_mechanism_under_different_tag_names_still_collides():
+    """The v7 smoke run drafted `gbdt, target-encoding-ctr, item-level-statistics` and then
+    `lightgbm, train-window-ctr-features, target-encoding` -- one idea, no shared tag string."""
+    from agent import gates
+    from agent.spec import ExperimentSpec
+    from agent.journal import Journal, Node
+
+    j = Journal()
+    prior = Node(id=2, parent_id=None, operation='draft')
+    prior.is_buggy, prior.val_primary = False, 0.5933
+    prior.spec = {'tags': ['gbdt', 'target-encoding-ctr', 'item-level-statistics']}
+    j.append(prior)
+
+    same = ExperimentSpec(tags=['lightgbm', 'train-window-ctr-features', 'target-encoding'])
+    assert gates._find_duplicate(same, j) is prior
+
+    other = ExperimentSpec(tags=['fm', 'pairwise-bpr-loss', 'ranking-objective'])
+    assert gates._find_duplicate(other, j) is None
+
+
+def test_gbdt_over_ctr_and_fm_over_ctr_are_not_the_same_experiment():
+    """runs/v5 nodes 6 and 15 share the CTR feature family but differ in model family, and the
+    normalisation must not collapse them (measured overlap 0.429, under the 0.5 bar)."""
+    from agent import gates
+    from agent.spec import ExperimentSpec
+    from agent.journal import Journal, Node
+
+    j = Journal()
+    six = Node(id=6, parent_id=0, operation='improve')
+    six.is_buggy, six.val_primary = False, 0.59
+    six.spec = {'tags': ['model-architecture', 'feature-engineering', 'lightgbm', 'ctr-features']}
+    j.append(six)
+
+    fifteen = ExperimentSpec(tags=['feature-engineering', 'ctr-features', 'fm', 'video-popularity'])
+    assert gates._find_duplicate(fifteen, j) is None

@@ -1,2 +1,16 @@
 numpy>=1.24
 anthropic>=1.0        # AnthropicBedrock client (AWS Bedrock)
+
+# Model libraries available to generated solutions. The problem statement puts any OSS library
+# in scope; these are the ones with working Python 3.13 / arm64 wheels that the sandbox can load.
+#
+# WARNING: torch cannot be imported in the same process as lightgbm or xgboost -- each bundles
+# its own OpenMP runtime and the process segfaults. Verified on macOS 15 / arm64; neither
+# KMP_DUPLICATE_LIB_OK nor OMP_NUM_THREADS=1 works around it. agent/executor.py detects the
+# resulting SIGSEGV and explains it, and the constraint is stated in agent/task_description.md.
+scipy>=1.18
+pandas>=3.0
+scikit-learn>=1.9
+lightgbm>=4.7
+xgboost>=3.4
+torch>=2.13

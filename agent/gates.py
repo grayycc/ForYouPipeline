@@ -13,6 +13,7 @@ import re
 from typing import List, Tuple
 
 from . import config
+from .lineage import FeatureProvenance, check_feature_lineage
 from .spec import REQUIRED_TEXT_FIELDS, ExperimentSpec
 
 MAX_SCOPE_FILES = 2
@@ -73,26 +74,85 @@ def check_spec(spec: ExperimentSpec, journal) -> Tuple[bool, List[str]]:
         reasons.append('literature is cited but no search was performed this run; '
                        'call search_papers before citing')
 
+    # provenance -- every experiment must declare the lineage semantics of the feature it adds
+    feature_provenance = getattr(spec, 'feature_provenance', None)
+    if feature_provenance:
+        if isinstance(feature_provenance, FeatureProvenance):
+            ok, reason = check_feature_lineage(feature_provenance, 'valid')
+            if not ok:
+                reasons.append(f'feature provenance rejected: {reason}')
+        elif isinstance(feature_provenance, list):
+            for feature in feature_provenance:
+                if isinstance(feature, FeatureProvenance):
+                    ok, reason = check_feature_lineage(feature, 'valid')
+                    if not ok:
+                        reasons.append(f'feature provenance rejected: {reason}')
+
     return (not reasons), reasons
 
 
+TAG_OVERLAP_THRESHOLD = 0.5
+
+# Tags are written freehand, so the same mechanism arrives under different names. The v7 smoke
+# run produced `gbdt, target-encoding-ctr, item-level-statistics` and `lightgbm,
+# train-window-ctr-features, target-encoding` on consecutive drafts -- the same idea, sharing no
+# tag string, so exact matching saw nothing. Folding the model-family and feature-family
+# synonyms together and also indexing each hyphen-separated token brings those two to 0.500
+# while leaving genuinely distinct pairs below the bar (measured on runs/v5: nodes 6 and 7,
+# which are the same experiment, score 1.000; nodes 6 and 15, GBDT-over-CTR against FM-over-CTR,
+# score 0.429 and correctly do not match).
+_TAG_SYNONYMS = {
+    'lightgbm': 'gbdt', 'xgboost': 'gbdt', 'gbm': 'gbdt', 'gradient-boosting': 'gbdt',
+    'boosted-trees': 'gbdt', 'catboost': 'gbdt',
+    'ctr': 'target-encoding', 'ctr-features': 'target-encoding',
+    'target-encoding-ctr': 'target-encoding', 'rate-features': 'target-encoding',
+    'item-level-statistics': 'target-encoding', 'popularity-features': 'target-encoding',
+}
+
+
+def _normalise_tags(tags) -> set:
+    """A tag set expanded to its synonyms and constituent tokens, for overlap comparison."""
+    out = set()
+    for t in tags or ():
+        t = str(t).lower().strip()
+        if not t:
+            continue
+        t = _TAG_SYNONYMS.get(t, t)
+        out.add(t)
+        for tok in t.split('-'):
+            if len(tok) > 2:
+                out.add(_TAG_SYNONYMS.get(tok, tok))
+    return out
+
+
 def _find_duplicate(spec: ExperimentSpec, journal):
-    """A prior scoring node whose tags match and whose change is near-identical."""
-    tags = {t.lower() for t in spec.tags}
+    """A prior scoring node testing the same mechanism.
+
+    Tags are matched by overlap rather than exact equality. Requiring identical tag sets let
+    `user-category-affinity`, `user-author-affinity` and `user-tag-affinity` through as three
+    distinct experiments in runs/v2 when they were one mechanism -- a sparse per-(user, X) label
+    rate -- wearing three join keys, and all three overfit identically.
+
+    Tags decide alone. There used to be a second condition, a >=0.7 bag-of-words overlap on
+    `proposed_change`, and it is what let runs/v5 run "LightGBM over marginal CTR rates" seven
+    times (nodes 2, 3, 4, 6, 7, 9, 14) for 37% of the run, every one a regression. Nodes 6 and 7
+    carry *identical* tag sets and were the same experiment, but "Replace FM with LightGBM
+    trained on..." and "Fix the LightGBM free_raw_data bug..." share too few tokens to clear the
+    bar. Measuring the overlap across v5 shows why no threshold rescues it: for pairs that are
+    the same idea the median overlap is 0.239, and for pairs that are different ideas the
+    maximum is 0.281. The distributions do not separate, so the condition was contributing noise
+    and vetoing real matches, and it is gone.
+
+    A duplicate is a soft finding -- it triggers a replan, which proceeds if the planner can
+    justify the difference -- so an over-eager match costs an explanation, not an iteration.
+    """
+    tags = _normalise_tags(spec.tags)
     if not tags:
         return None
-    mine = _token_set(spec.proposed_change)
     for node in getattr(journal, 'nodes', []):
-        prior = getattr(node, 'spec', None)
-        if not prior:
+        prior_tags = _normalise_tags(((getattr(node, 'spec', None) or {}).get('tags') or []))
+        if not prior_tags:
             continue
-        prior_tags = {str(t).lower() for t in (prior.get('tags') or [])}
-        if not prior_tags or prior_tags != tags:
-            continue
-        theirs = _token_set(prior.get('proposed_change', ''))
-        if not mine or not theirs:
-            continue
-        overlap = len(mine & theirs) / max(len(mine | theirs), 1)
-        if overlap >= 0.7:
+        if len(prior_tags & tags) / max(len(prior_tags | tags), 1) >= TAG_OVERLAP_THRESHOLD:
             return node
     return None

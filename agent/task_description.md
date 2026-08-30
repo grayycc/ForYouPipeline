@@ -99,17 +99,24 @@ is noise, not a result. Do not build on top of a change you have not separated f
 | `log_standard_4_22_to_5_08_pure.csv` | valid+test window |
 | `log_random_4_22_to_5_08_pure.csv` | **1,186,059 rows of randomly-exposed impressions** over the valid+test window. Videos here were shown at random rather than chosen by the production recommender, so metrics computed on it are not biased by the logging policy. |
 
-**Encoding the random-exposure log consistently.** It has the same 19 columns as the standard
-logs, which means two things you must handle or its metric will not be comparable with
-validation:
+**Do not hand-roll the random-exposure scoring — import it.** `kit/unbiased.py` does the
+loading, the date filter, the `author_id` join and the encoding, and its equivalence to
+`data.encode()` is asserted in `tests/test_unbiased.py`. Reimplementing it has produced
+mismatched `dur_bucket` edges, all-`UNK` authors and a stubbed-out metric in past runs, and
+none of it is a research question:
 
-- **There is no `author_id` column in any log file.** `data.load()` joins it from
-  `video_features_basic_pure.csv` (`video_id -> author_id`, `'UNK'` when missing). Do the same
-  join for random-exposure rows rather than defaulting them all to `'UNK'`.
-- **`dur_bucket` is quantile-based, not fixed thresholds.** `data.encode()` derives 10 bucket
-  edges with `np.quantile` over the *training* split's `duration_ms`. Reuse those same edges;
-  inventing round-number cutoffs puts the random rows in different buckets from the rows the
-  model trained on.
+```python
+from unbiased import load_random_valid, encode_like_train, unbiased_primary
+
+rand_rows = load_random_valid(data_dir)                       # 288,338 rows, valid window
+X_rand, y_rand, u_rand, _ = encode_like_train(splits['train'], rand_rows)
+unbiased = unbiased_primary(data_dir, splits['train'], lambda rows: model.predict(X_rand))
+```
+
+`encode_like_train(train_rows, target_rows)` returns `(X, y, users, dim)` using the vocabulary
+and quantile edges derived from `train_rows` alone. If your model does not use
+`data.encode()`-style features, pass your own scoring function to `unbiased_primary` instead —
+it only needs one score per row.
 
 Its label distribution differs sharply from the standard logs — about 63% of users there have
 no positive at all, against 27% in validation — so its absolute primary is much lower. That is
@@ -135,7 +142,52 @@ Log columns available beyond those `load()` exposes: `hourmin`, `time_ms`, `is_c
 `is_like`, `is_follow`, `is_comment`, `is_forward`, `is_hate`, `play_time_ms`,
 `profile_stay_time`, `comment_stay_time`, `is_profile_enter`, `is_rand`.
 
-Note: this KuaiRand-Pure release ships **no** caption or category files — do not try to load them.
+### Two additional content files
+
+| file | size | key column | content |
+|---|---|---|---|
+| `kuairand_video_categories.csv` | 3.7 GB | `final_video_id` | four levels of hierarchical topic id + name + confidence |
+| `kuairand_video_captions.csv` | 3.2 GB | `final_video_id` | `caption` (Chinese text), `show_cover_text`, `duration` |
+
+These ship with the KuaiRand release, so they are in scope. They are sized for the whole
+KuaiRand family (32M rows), not for Pure. The following was measured on this machine, so you
+do not have to rediscover it:
+
+- **`final_video_id` 0–7582 is exactly Pure's `video_id` space**, and those are the *first*
+  7,583 records of both files, in ascending order. (Verified by matching the caption file's
+  `duration` against `video_features_basic_pure.csv`'s `video_duration`: 7,583 of 7,583 agree.)
+  **Break out of the reader once the id exceeds 7582.** Reading either file to the end costs
+  ~55 s and ~4 GB of resident memory to collect ids belonging to the 1k/27k variants that are
+  never scored here; the early exit costs ~0.02 s and ~2 MB. Both files together will approach
+  the executor's memory cap if read in full.
+- **Join key normalisation.** The id column reads as `'0'`, `'1'`, …, but category *values*
+  carry a `.0` suffix (`'39.0'`). Key your map with `str(int(float(row['final_video_id'])))`
+  so it matches the plain string `video_id` in `load()`'s rows. A silent key mismatch here
+  produces an all-UNK feature that looks exactly like "the idea did not work".
+- **Category coverage over Pure's 7,583 videos**, after filtering `-124.0` / `UNKNOWN` / `nan`:
+
+  | level | distinct values | coverage |
+  |---|---|---|
+  | first | 38 | 99.8% |
+  | second | 155 | 85.6% |
+  | third | 245 | 37.6% |
+  | fourth | 77 | 7.0% |
+
+- **`video_features_basic_pure.csv` already carries a `tag` column locally** (626 KB, no large
+  file needed). It is a *multi-valued* list (e.g. `'20,43'`) and agrees with
+  `first_level_category_id` on 4,278 of 7,583 videos — a related but distinct taxonomy, not a
+  substitute for it. It was **not** among the 13 fields in the organisers' negative feature
+  ablation.
+- **Captions are Chinese and unsegmented.** A `[A-Za-z0-9一-龥]+` tokeniser splits on
+  `#` and spaces, so hashtags come out as clean tokens but each free-text sentence becomes one
+  long token. Measured: 24,088 distinct tokens across Pure's videos, of which only 250 appear
+  in 10 or more videos and 33 in 50 or more; 1,985 are single-occurrence long blobs. The most
+  frequent tokens are platform campaign tags (`快手热点`, `集结吧光合创作者`) and account
+  handles (`o40300129`) rather than topics.
+
+The leakage rule applies to these exactly as it does to the logs: **never use whole-period or
+post-time statistics directly as features.** Anything you aggregate must come from information
+available strictly before the row being scored.
 
 ## What the FM baseline currently does
 
@@ -164,6 +216,24 @@ Write **one standalone Python file** that:
 
 1. Accepts exactly these arguments:
    `--data_dir <path>` `--out_dir <path>` `--seed <int>`
+   `--train_split {train,train+valid}` (optional, default `train`)
+
+   `--train_split train+valid` is used **once, after the run has converged**, and its only job
+   is to regenerate the final test submission. The test window directly follows validation, so
+   refitting the winning configuration on both splits gives it a week of more recent data.
+   When it is passed:
+   - train on `train` and `valid` rows combined;
+   - do **not** early-stop on validation — it is inside the training set now, so the stopping
+     signal is gone. Use the epoch count the `train` run settled on, or a fixed schedule;
+   - write **only** `<out_dir>/submission_test.csv`. Do **not** score validation, do not write
+     `submission_valid.csv`, and do not print the metric lines. Nothing reads them in this mode.
+
+   Keep this branch narrow: it must not change how the default `--train_split train` path
+   computes anything. Scoring validation with statistics fitted on train+valid would be
+   leakage, which is exactly why this mode does not score validation at all.
+
+   Ignoring the flag is not an error, but a solution that does not implement it simply forgoes
+   the refit.
 2. Trains on the train split and evaluates on the validation split using `evaluate()`.
 3. Prints these lines to stdout, exactly, on their own lines (they are regex-parsed —
    no other format is read):
@@ -196,7 +266,26 @@ Write **one standalone Python file** that:
    repeating up to 12 times.
 5. Respects `--seed` for every source of randomness, so the same seed reproduces the same
    score and different seeds give an honest spread.
-6. Uses only the Python standard library and numpy. Keep runtime well under 15 minutes.
+6. Imports only from the standard library and the packages listed below. Keep runtime under
+   25 minutes.
+
+### Available packages
+
+`numpy`, `scipy`, `pandas`, `scikit-learn`, `lightgbm`, `xgboost`, `torch`.
+
+Nothing else is installed, and the sandbox has no network, so an import outside this list will
+fail. There is no GPU; `torch` runs on CPU.
+
+> **Hard constraint, verified on this machine.** `torch` cannot be used in the same script as
+> `lightgbm` or `xgboost`. Each bundles its own OpenMP runtime and the process dies on a
+> segfault with no traceback the moment the second one does real work. Neither
+> `KMP_DUPLICATE_LIB_OK=TRUE` nor `OMP_NUM_THREADS=1` avoids it. Pick one side per solution.
+> `numpy`, `scipy`, `pandas` and `scikit-learn` are safe alongside either.
+
+One property of the FM baseline worth knowing, since it constrains what a feature can even be:
+an FM takes each feature as an index into a single shared embedding table, so a continuous
+value has to be discretised into buckets before it can be used at all. Model families that
+accept continuous inputs directly do not have that constraint.
 
 ## How to reason
 
@@ -210,3 +299,4 @@ The metric definitions, the within-user structure, the ~5-impressions-per-user s
 evaluation data, and the established findings above are the material you reason from.
 Nobody is going to hand you a list of things to try — identifying what is worth trying, and
 why, is the actual work.
+

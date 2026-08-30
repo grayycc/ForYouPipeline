@@ -38,3 +38,6 @@ runs/smoke*/
 
 # OS
 .DS_Store
+
+# Scratch strategy notes, kept out of the deliverable repo.
+notes/

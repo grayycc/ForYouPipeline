@@ -23,6 +23,20 @@ METRIC_RES = {
 }
 EXC_RE = re.compile(r'^(\w+(?:Error|Exception|Interrupt)):', re.MULTILINE)
 
+# subprocess reports a signal death as a negative return code; a shell would report 128+signal.
+# SIGSEGV is 11, SIGBUS 10, SIGABRT 6.
+SEGFAULT_CODES = (-11, 139, -10, 138, -6, 134)
+SEGFAULT_HINT = (
+    'The process died on a signal (segfault/abort) rather than raising, so there is no Python '
+    'traceback to read.\n'
+    'By far the most likely cause on this machine: `torch` was imported in the same script as '
+    '`lightgbm` or `xgboost`. Those libraries each bundle their own OpenMP runtime and crash '
+    'when loaded together -- verified, and neither KMP_DUPLICATE_LIB_OK nor OMP_NUM_THREADS=1 '
+    'avoids it.\n'
+    'Fix: use torch OR the gradient-boosting libraries in a single solution, never both. '
+    '(scikit-learn, scipy, pandas and numpy are safe alongside either.)'
+)
+
 
 def strip_fences(text: str) -> str:
     """LLMs wrap code in markdown fences; unstripped, every iteration dies on a syntax error."""
@@ -66,7 +80,14 @@ def parse_metrics(stdout: str) -> dict:
 
 
 def _limit_memory():
-    """Best-effort address-space cap. Not supported everywhere, so never fatal."""
+    """Best-effort address-space cap. Not supported everywhere, so never fatal.
+
+    Measured on this machine (macOS 15, arm64): setrlimit(RLIMIT_AS, ...) raises
+    `ValueError: current limit exceeds maximum limit` for every value, because the inherited
+    soft limit is already RLIM_INFINITY and macOS will not lower it here. The except below has
+    therefore always swallowed it and EXEC_MEMORY_CAP_GB has never actually bounded anything on
+    darwin. Left in place because it does work on Linux, but do not rely on it as a guard.
+    """
     try:
         import resource
         cap = config.EXEC_MEMORY_CAP_GB * 1024 ** 3
@@ -77,7 +98,8 @@ def _limit_memory():
 
 def run_solution(code_path: str, out_dir: str, seed: int = 0,
                  timeout: int = config.EXEC_TIMEOUT_S,
-                 require_metrics: bool = True) -> dict:
+                 require_metrics: bool = True,
+                 extra_args: list = None) -> dict:
     """Run one generated solution in a subprocess. Returns a result dict; never raises.
 
     `require_metrics=False` is for the EDA pass, which produces findings rather than a score:
@@ -88,13 +110,13 @@ def run_solution(code_path: str, out_dir: str, seed: int = 0,
     cmd = [sys.executable, code_path,
            '--data_dir', config.DATA_DIR,
            '--out_dir', out_dir,
-           '--seed', str(seed)]
+           '--seed', str(seed)] + list(extra_args or [])
     # the solution lives in its node dir, so sys.path[0] is *not* the repo root:
     # PYTHONPATH is what lets it `from data import load` (kit/) and import our modules.
     env = dict(os.environ)
     env['PYTHONPATH'] = os.pathsep.join(
         [config.KIT_DIR, config.REPO_ROOT, env.get('PYTHONPATH', '')]).rstrip(os.pathsep)
-    t0 = time.time()
+    t0 = time.monotonic()
     try:
         p = subprocess.run(
             cmd, cwd=config.REPO_ROOT, capture_output=True, text=True, env=env,
@@ -108,11 +130,17 @@ def run_solution(code_path: str, out_dir: str, seed: int = 0,
     except Exception as e:                                  # launch failure
         stdout, stderr, rc, timed_out = '', f'{type(e).__name__}: {e}', -1, False
 
-    elapsed = time.time() - t0
+    elapsed = time.monotonic() - t0
     metrics = parse_metrics(stdout)
 
     if timed_out:
         buggy, reason, exc = True, f'timeout>{timeout}s', 'Timeout'
+    elif rc in SEGFAULT_CODES:
+        # A segfault kills the interpreter before it can raise, so stderr comes back empty and
+        # the debugger role has nothing to work from. On this machine the overwhelmingly likely
+        # cause is the OpenMP clash below, so say so rather than handing back a bare exit code.
+        buggy, reason, exc = True, 'segfault', 'Segfault'
+        stderr = (stderr + '\n' + SEGFAULT_HINT).strip()
     elif rc != 0:
         m = EXC_RE.findall(stderr)
         buggy, reason, exc = True, 'exception', (m[-1] if m else 'NonZeroExit')
