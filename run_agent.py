@@ -13,6 +13,7 @@ from agent.orchestrator import Agent
 
 
 def main():
+    """Parse arguments and run one agent to completion."""
     ap = argparse.ArgumentParser()
     ap.add_argument('--run_id', default=datetime.datetime.now().strftime('run_%Y%m%d_%H%M%S'))
     ap.add_argument('--max_iterations', type=int, default=config.MAX_ITERATIONS)

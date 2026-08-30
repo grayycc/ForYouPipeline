@@ -1,12 +1,10 @@
-"""Iteration 1: one pass of data inspection, whose findings ground every later hypothesis.
+"""One pass of data inspection, whose findings ground every later hypothesis.
 
-Runs once rather than every iteration. Figure 1 puts "inspect data" inside the loop, but the
-train split does not change, so re-measuring it 50 times would spend the scarcest resource on
-re-deriving the same numbers. The findings are cached and injected into every Planner call
-instead. Measurements EDA did not anticipate can be printed alongside a later experiment,
-which costs nothing because stdout is already fed back.
+It runs once, not per iteration: the train split does not change, so re-measuring it would
+spend the scarce resource on the same numbers. The findings are cached into every planner
+call, and anything this pass missed can be printed alongside a later experiment.
 
-Exempt from the submission and metric contract: a clean exit is success.
+Exempt from the submission and metric contract -- a clean exit is success.
 """
 from .. import config
 from . import base

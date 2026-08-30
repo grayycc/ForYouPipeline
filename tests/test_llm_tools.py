@@ -15,6 +15,7 @@ from agent.llm import LLMClient, LLMError, BUDGET_SPENT
 
 class Block:
     def __init__(self, type, text=None, id=None, name=None, input=None):
+        """One response content block."""
         self.type, self.text, self.id, self.name, self.input = type, text, id, name, input
 
 
@@ -27,15 +28,18 @@ class Usage:
 
 class Response:
     def __init__(self, content, stop_reason='end_turn'):
+        """One API response."""
         self.content, self.stop_reason, self.usage = content, stop_reason, Usage()
 
 
 class FakeMessages:
     """Replays a scripted list of responses and records whether tools were sent each turn."""
     def __init__(self, script):
+        """Hold the responses to replay, newest first."""
         self.script, self.turns, self.tools_sent = list(script), 0, []
 
     def create(self, **kwargs):
+        """Replay the next scripted response, recording whether tools were sent."""
         self.tools_sent.append('tools' in kwargs)
         self.turns += 1
         return self.script.pop(0)
@@ -43,16 +47,19 @@ class FakeMessages:
 
 class FakeClient:
     def __init__(self, script):
+        """Expose a messages endpoint over the scripted responses."""
         self.messages = FakeMessages(script)
 
 
 def _client(script):
+    """A client wired to a scripted list of responses."""
     c = LLMClient()
     c._client = FakeClient(script)
     return c
 
 
 def _search(n):
+    """One tool_use block asking for a search."""
     return Block('tool_use', id=f'tu{n}', name='search_papers', input={'query': f'q{n}'})
 
 
@@ -79,6 +86,7 @@ def test_cap_is_enforced_by_the_handler():
     c = _client(script)
 
     def handler(name, args):
+        """Record the query and return a fixed result."""
         calls.append(args['query'])
         return 'results'
 
@@ -91,10 +99,12 @@ def test_cap_is_enforced_by_the_handler():
 
 
 def test_a_failing_tool_does_not_kill_the_call():
+    """A tool that raises becomes a tool result, not a dead iteration."""
     script = [Response([_search(1)], 'tool_use'), Response([Block('text', 'answer')])]
     c = _client(script)
 
     def boom(name, args):
+        """A tool that always raises."""
         raise ValueError('openalex down')
 
     text, _, _ = c.complete('sys', 'user', 'm', tools=TOOL,
@@ -127,6 +137,7 @@ def test_runaway_tool_use_terminates():
 
 
 def test_budget_spent_text_reaches_the_model():
+    """The model is told the budget is gone, in the tool result."""
     seen = {}
     script = [Response([_search(1)], 'tool_use'),
               Response([_search(2)], 'tool_use'),
@@ -135,6 +146,7 @@ def test_budget_spent_text_reaches_the_model():
     real_create = c._client.messages.create
 
     def spy(**kwargs):
+        """Capture the messages sent, then delegate."""
         seen['messages'] = kwargs['messages']
         return real_create(**kwargs)
 

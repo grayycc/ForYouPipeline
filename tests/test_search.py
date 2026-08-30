@@ -16,17 +16,20 @@ RUN_ID = '_test_search'
 
 
 def _agent():
+    """An agent with an empty journal, for exercising select() alone."""
     a = Agent(RUN_ID)
     a.journal = Journal()
     return a
 
 
 def _scored(nid, op, score, parent=None, accepted=False):
+    """A node that ran and scored, optionally accepted."""
     return Node(id=nid, parent_id=parent, operation=op, is_buggy=False, val_primary=score,
                 accepted=accepted, code=f'# solution {nid}\n', hypothesis=f'h{nid}')
 
 
 def test_phase_order():
+    """baseline, then EDA, then drafting."""
     a = _agent()
     assert a.select()[0] == 'baseline'
 
@@ -40,6 +43,7 @@ def test_phase_order():
 
 
 def test_drafting_runs_until_min_drafts_then_goes_greedy():
+    """Drafting stops at MIN_DRAFTS, counting the baseline as the first."""
     a = _agent()
     a.journal.append(_scored(0, 'baseline', 0.6024, accepted=True))
     a.journal.append(Node(id=1, parent_id=0, operation='eda', is_buggy=False))
@@ -70,6 +74,7 @@ def test_implausible_is_flagged_before_seeds_are_spent():
 
 
 def test_flag_implausible_marks_and_spares():
+    """Only scored nodes below the rung are flagged."""
     a = _agent()
     below = _scored(9, 'draft', config.SANITY_FLOOR - 0.01)
     a._flag_implausible(below)
@@ -85,6 +90,7 @@ def test_flag_implausible_marks_and_spares():
 
 
 def test_improve_branches_from_best_not_last():
+    """Greedy search branches from the best node, not the most recent."""
     a = _agent()
     a.journal.append(_scored(0, 'baseline', 0.6024, accepted=True))
     a.journal.append(Node(id=1, parent_id=0, operation='eda', is_buggy=False))

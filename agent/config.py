@@ -59,13 +59,9 @@ def _kit_scores():
 _SCORES = _kit_scores()
 _S = _SCORES['scores']
 
-# Convergence, fixed by the benchmark specification -- do not tune these to buy iterations.
-# The spec notes the rule "normally triggers first", ahead of the 50-iteration cap.
-#
-# Consequence, measured across runs: the agent gets roughly four scoring experiments, and
-# unless one gains more than epsilon the run ends. That is the rule working as written, not a
-# bug -- the only legitimate way to use the full budget is to make steps larger than it, which
-# is a question of what the agent tries, not of where the threshold sits.
+# Convergence, read from the kit rather than chosen by us -- do not tune these to buy
+# iterations. In practice the agent gets about four scoring experiments before the rule fires,
+# so the only legitimate way to use more budget is to make larger steps.
 EPSILON = _SCORES['convergence_rule']['epsilon']
 CONVERGENCE_N = _SCORES['convergence_rule']['N']
 
@@ -75,13 +71,9 @@ BASELINE_TEST_PRIMARY = _S['fm_official']['test']['primary']
 ORACLE_PRIMARY = _S['oracle_ceiling']['test']['primary']
 SEED_STD = _S['fm_official']['std_over_5_seeds']['test_primary']
 
-# Below this a result is broken code, not a weak idea. Item popularity is the organisers' own
-# trivial rung, so a trained model landing under it has a bug. Used only by the harness -- the
-# agent is never shown it and still chooses its own experiments.
-# The validation figure, since that is the split nodes are scored on; the test-split value
-# would be the wrong bar here. Measured: a pairwise-ranking node scored below this, was
-# recorded as a legitimate negative, and the planner concluded the mechanism had failed when
-# only the implementation had.
+# Below this a result is broken code, not a weak idea: a trained model cannot legitimately
+# rank worse than counting impressions. The validation figure, since that is the split nodes
+# are scored on. Used only by the harness; the agent is never shown it.
 SANITY_FLOOR = _S['item_popularity']['valid']['primary']
 
 # Search policy.
@@ -98,25 +90,15 @@ EXEC_TIMEOUT_S = 900              # 15 min; baseline is ~40s, so this is generou
 EXEC_MEMORY_CAP_GB = 12
 STDOUT_TAIL_CHARS = 1500
 
-# LLM access through AWS Bedrock.
-# .env is the single source of truth for all four of these. No fallbacks, no defaults:
-# an unset value is an error at call time, not something quietly guessed here.
-#   AWS_BEARER_TOKEN     -- Bedrock API key
-#   AWS_REGION           -- e.g. ap-southeast-1
-#   AGENT_*_MODEL        -- one inference profile id per role, listed below
+# Bedrock access. .env is the single source of truth -- no fallbacks and no defaults, so an
+# unset value is an error at call time rather than something quietly guessed here.
 BEDROCK_API_KEY = _env('AWS_BEARER_TOKEN')
 AWS_REGION = _env('AWS_REGION')
 
-# One model per role, each set independently in .env so a role can be tuned without
-# disturbing the others. These are all Claude models differing in capability rather than task
-# specialisation, so choose by how hard the role's job is.
-#
-# Measured inputs to those choices:
-#   - Haiku 4.5 as the coder emitted reasoning prose inside the code fence and produced a file
-#     that would not parse. Roles that write a whole training file want a stronger model.
-#   - Prompt caching needs a prefix above a model-specific minimum: 1024 tokens on Sonnet 4.6,
-#     4096 on Haiku 4.5. The ~2.5K-token task description therefore caches on the former and
-#     silently does not on the latter.
+# One model per role, set independently in .env, chosen by how hard the role's job is. Two
+# measured constraints: a weaker coder writes prose inside the code fence and the file will not
+# parse, and prompt caching needs a prefix above a model-specific minimum (1024 tokens on
+# Sonnet 4.6, 4096 on Haiku 4.5), so the task description caches on the former only.
 PLANNER_MODEL = _env('AGENT_PLANNER_MODEL')
 BASELINE_MODEL = _env('AGENT_BASELINE_MODEL')
 EDA_MODEL = _env('AGENT_EDA_MODEL')

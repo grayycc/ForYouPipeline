@@ -1,12 +1,9 @@
-"""The ExperimentSpec: the contract between the Planner and the Coder.
+"""The ExperimentSpec: the contract between the planner and the coder.
 
-Separating "what am I testing and why" from "how do I write it" is the point of this object.
-The Planner may only emit a spec that states a mechanism and a falsification condition, so a
-vague suggestion cannot become an experiment. The Coder receives the spec and implements
-exactly it.
+It separates what is being tested from how it gets written. A spec must state a mechanism and
+a falsification condition, so a vague suggestion cannot become an experiment.
 
-Parsing is deliberately tolerant and never raises: a malformed spec is a recoverable event
-the orchestrator handles by replanning, not a crash.
+Parsing never raises -- a malformed spec is replanned, not crashed on.
 """
 import dataclasses
 import json
@@ -36,6 +33,7 @@ class ExperimentSpec:
     prior_failure_attribution: str = ''
 
     def to_dict(self) -> Dict[str, Any]:
+        """Plain dict for the node record and log.jsonl."""
         return dataclasses.asdict(self)
 
     @property
@@ -47,6 +45,7 @@ class ExperimentSpec:
         return _extract_ids(str(lit))
 
     def summary(self, width: int = 150) -> str:
+        """One truncated line naming the change, for the console."""
         return (self.proposed_change or self.hypothesis)[:width].replace('\n', ' ')
 
 
@@ -97,11 +96,13 @@ def parse_spec(text: str) -> Tuple[Optional[ExperimentSpec], str]:
         return None, f'spec must be a JSON object, got {type(raw).__name__}'
 
     def as_text(v):
+        """Any JSON value flattened to a string; lists become space-joined."""
         if isinstance(v, (list, tuple)):
             return ' '.join(str(x) for x in v)
         return '' if v is None else str(v)
 
     def as_list(v):
+        """A list of non-empty strings, accepting a comma-separated string too."""
         if v is None:
             return []
         if isinstance(v, str):
@@ -109,6 +110,7 @@ def parse_spec(text: str) -> Tuple[Optional[ExperimentSpec], str]:
         return [str(x).strip() for x in v if str(x).strip()]
 
     def as_map(v):
+        """A string-to-string dict; a bare value is kept under 'note' rather than dropped."""
         if isinstance(v, dict):
             return {str(k): as_text(x) for k, x in v.items()}
         return {'note': as_text(v)} if v else {}

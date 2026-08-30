@@ -1,12 +1,11 @@
 """Check generated code for label leakage before it runs.
 
-Leakage is the quietest way to lose: validation looks excellent, the hidden test score
-collapses, and with one scored submission there is no second chance to notice. Nothing else in
-the loop can see it -- a leaky solution produces a *better* validation number, so every other
-gate waves it through.
+Leakage is the quietest way to lose: validation looks excellent and the hidden test score
+collapses. Nothing else in the loop can catch it, because a leaky solution scores *better* on
+validation and every other gate waves it through.
 
-A flagged solution still runs; it just cannot become the submission. Blocking execution
-outright would let a false positive cost an iteration.
+A flagged solution still runs but cannot become the submission, so a false positive costs
+nothing.
 """
 from .. import config
 from . import base

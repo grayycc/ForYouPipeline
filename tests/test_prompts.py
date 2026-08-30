@@ -14,6 +14,7 @@ LIBRARIES = ('numpy', 'pandas', 'scipy', 'scikit-learn', 'lightgbm', 'torch')
 
 
 def _spec(target='GAUC'):
+    """A minimal valid spec, for rendering."""
     return ExperimentSpec(
         hypothesis='pairwise loss beats pointwise', mechanism='optimises ordering',
         evidence={}, target_metric=target, proposed_change='swap BCE for BPR',
@@ -61,6 +62,7 @@ def test_metric_section_is_lifted_not_restated():
 
 
 def test_missing_section_fails_loudly():
+    """A moved heading must break at import, not send an empty section."""
     try:
         base._section('a heading that is not there')
     except RuntimeError as e:
@@ -70,6 +72,7 @@ def test_missing_section_fails_loudly():
 
 
 def test_coder_prompt_carries_the_weighting_rule_and_the_metric():
+    """The coder sees how the metric aggregates, next to the spec."""
     rendered = coder._render(_spec())
     # The wording must not be readable as "average the per-user AUCs equally" -- a coder read
     # it that way and sampled users uniformly, flattening the weighting the metric is built on.
@@ -84,6 +87,7 @@ def test_coder_prompt_carries_the_weighting_rule_and_the_metric():
 
 
 def test_metric_section_present_for_any_target():
+    """Every target metric renders the definition."""
     for target in ('GAUC', 'nDCG@5', 'both', ''):
         assert 'sum(npos_u * AUC_u) / sum(npos_u)' in coder._render(_spec(target)), target
 
@@ -91,9 +95,11 @@ def test_metric_section_present_for_any_target():
 class _FakeLLM:
     """Returns a valid file, and asserts the retry actually quotes the syntax error."""
     def __init__(self):
+        """Count how many retries were requested."""
         self.calls = 0
 
     def complete(self, system, prompt, model, cached_prefix=None, role='', **kw):
+        """Stands in for the model, asserting the retry quotes the error."""
         self.calls += 1
         assert 'not valid Python' in prompt, 'the retry must quote the error'
         return '```python\nimport numpy as np\nx = 1\n```', 5, 5

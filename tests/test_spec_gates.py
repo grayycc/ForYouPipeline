@@ -28,6 +28,7 @@ GOOD = {
 
 
 def journal_with(spec_dict=None, registry=None):
+    """A journal whose citation registry holds the given paper ids."""
     j = Journal()
     j.citation_registry = registry or {}
     if spec_dict:
@@ -38,42 +39,50 @@ def journal_with(spec_dict=None, registry=None):
 
 
 def test_parses_plain_json():
+    """A bare JSON object parses."""
     spec, err = parse_spec(json.dumps(GOOD))
     assert err == '' and spec.tags == ['ranking-loss', 'listwise'], (err, spec)
 
 
 def test_parses_fenced_json_with_prose():
+    """JSON inside a fence, surrounded by reasoning, parses."""
     text = "Here is my plan.\n\n```json\n" + json.dumps(GOOD) + "\n```\nThat is the spec."
     spec, err = parse_spec(text)
     assert err == '' and spec.hypothesis.startswith('Replacing pointwise'), (err, spec)
 
 
 def test_malformed_json_returns_error_not_raise():
+    """Bad JSON returns an error the loop can act on."""
     spec, err = parse_spec('{"hypothesis": "x", "mechanism":}')
     assert spec is None and 'not valid JSON' in err, (spec, err)
 
 
 def test_no_json_returns_error():
+    """A response with no object at all returns an error."""
     spec, err = parse_spec('I think we should try a ranking loss.')
     assert spec is None and 'no JSON' in err, (spec, err)
 
 
 def test_empty_returns_error():
+    """Empty input returns an error rather than raising."""
     assert parse_spec('')[0] is None and parse_spec('   ')[0] is None
 
 
 def test_nested_braces_survive():
+    """Nested objects are not truncated by the brace scan."""
     spec, _ = parse_spec(json.dumps(GOOD))
     assert spec.evidence['task_structure'].startswith('~5 impressions')
 
 
 def test_good_spec_passes():
+    """A complete, novel, legal spec clears every gate."""
     spec, _ = parse_spec(json.dumps(GOOD))
     ok, reasons = check_spec(spec, journal_with(registry={'W2140310134': {}}))
     assert ok, reasons
 
 
 def test_protected_file_rejected():
+    """The agent may not edit the metric or the data loader."""
     bad = dict(GOOD, implementation_scope=['evaluate.py'])
     spec, _ = parse_spec(json.dumps(bad))
     ok, reasons = check_spec(spec, journal_with(registry={'W2140310134': {}}))
@@ -81,6 +90,7 @@ def test_protected_file_rejected():
 
 
 def test_missing_falsification_rejected():
+    """A hypothesis that cannot be wrong is not an experiment."""
     bad = dict(GOOD); bad['falsification_condition'] = ''
     spec, _ = parse_spec(json.dumps(bad))
     ok, reasons = check_spec(spec, journal_with(registry={'W2140310134': {}}))
@@ -88,6 +98,7 @@ def test_missing_falsification_rejected():
 
 
 def test_duplicate_rejected():
+    """An idea already tried this run is rejected."""
     spec, _ = parse_spec(json.dumps(GOOD))
     ok, reasons = check_spec(spec, journal_with(spec_dict=GOOD,
                                                 registry={'W2140310134': {}}))
@@ -109,6 +120,7 @@ _RATE_TEMPLATE = {
 
 
 def _rate_spec(field):
+    """A spec proposing per-item rate features, varying only the field."""
     return dict(GOOD,
                 mechanism=_RATE_TEMPLATE['mechanism'],
                 proposed_change=_RATE_TEMPLATE['proposed_change'].format(field=field),
@@ -117,6 +129,7 @@ def _rate_spec(field):
 
 
 def test_same_mechanism_different_field_is_a_duplicate():
+    """The same idea applied to another column is the same idea."""
     prior = _rate_spec('video')
     spec, _ = parse_spec(json.dumps(_rate_spec('author')))
     ok, reasons = check_spec(spec, journal_with(spec_dict=prior, registry={}))
@@ -124,6 +137,7 @@ def test_same_mechanism_different_field_is_a_duplicate():
 
 
 def test_same_mechanism_different_implementation_is_allowed():
+    """A genuinely different implementation is a new experiment."""
     prior = dict(GOOD, evidence={},
                  mechanism='align the training objective with within-user ranking',
                  proposed_change=('sample one random positive and one random negative per user '
@@ -142,18 +156,21 @@ def test_same_mechanism_different_implementation_is_allowed():
 
 
 def test_unregistered_citation_rejected():
+    """A paper no search returned cannot be cited."""
     spec, _ = parse_spec(json.dumps(GOOD))
     ok, reasons = check_spec(spec, journal_with(registry={'W999999': {}}))
     assert not ok and any('never returned by a search' in r for r in reasons), reasons
 
 
 def test_citation_without_any_search_rejected():
+    """Nothing may be cited before a search has run."""
     spec, _ = parse_spec(json.dumps(GOOD))
     ok, reasons = check_spec(spec, journal_with(registry={}))
     assert not ok and any('no search was performed' in r for r in reasons), reasons
 
 
 def test_too_many_files_rejected():
+    """A change spanning many files cannot be attributed."""
     bad = dict(GOOD, implementation_scope=['a.py', 'b.py', 'c.py'])
     spec, _ = parse_spec(json.dumps(bad))
     ok, reasons = check_spec(spec, journal_with(registry={'W2140310134': {}}))
@@ -161,6 +178,7 @@ def test_too_many_files_rejected():
 
 
 def test_empty_spec_never_raises():
+    """Gates report on an empty spec instead of crashing the loop."""
     ok, reasons = check_spec(ExperimentSpec(), journal_with())
     assert not ok and reasons
 

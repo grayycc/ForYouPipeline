@@ -1,15 +1,10 @@
-"""Literature search for the Planner, backed by OpenAlex.
+"""Literature search for the planner, backed by OpenAlex.
 
-Why OpenAlex and not arXiv: arXiv's API and Semantic Scholar both return HTTP 429 from this
-network -- arXiv across three attempts with backoff and a descriptive User-Agent. OpenAlex
-answers in about a second and needs no key.
+OpenAlex rather than arXiv or Semantic Scholar: both of those return HTTP 429 from this
+network. The planner finds its own papers instead of being handed a curated library, since
+curating one would mean we chose the solution space.
 
-Why this exists at all: the Planner should find its own literature rather than be handed a
-library we curated, because curating it would mean we chose the solution space. The registry
-this module feeds also makes citations verifiable -- the Planner can only cite identifiers a
-real response actually returned, so a fabricated reference cannot reach the run log.
-
-Nothing here raises. A search outage degrades citation quality, never an iteration.
+Nothing here raises -- a search outage costs citation quality, never an iteration.
 """
 import hashlib
 import json
@@ -46,6 +41,7 @@ TOOL_SCHEMA = {
 
 
 def _cache_path(query: str) -> str:
+    """Cache file for a query, keyed on its normalised text so spacing and case do not miss."""
     key = hashlib.sha1(' '.join(query.lower().split()).encode()).hexdigest()
     return os.path.join(config.RESEARCH_CACHE_DIR, f'{key}.json')
 
@@ -59,6 +55,7 @@ def _rebuild_abstract(inverted) -> str:
 
 
 def _shape(work: dict) -> dict:
+    """One OpenAlex record trimmed to the fields the planner reads, abstract truncated."""
     abstract = _rebuild_abstract(work.get('abstract_inverted_index'))
     if len(abstract) > config.ABSTRACT_CHARS:
         abstract = abstract[:config.ABSTRACT_CHARS].rsplit(' ', 1)[0] + '...'

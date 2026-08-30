@@ -51,6 +51,7 @@ score = [rate[r[2]] for r in splits['valid']]
 
 
 def run(model=None, verbose=True):
+    """Run every leakage case and report which verdicts were wrong."""
     model = model or config.REVIEWER_MODEL
     config.REVIEWER_MODEL = model
     llm = LLMClient()

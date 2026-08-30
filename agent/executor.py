@@ -54,6 +54,8 @@ def trim_traceback(stderr: str, max_chars: int = config.STDOUT_TAIL_CHARS) -> st
 
 
 def parse_metrics(stdout: str) -> dict:
+    """Pull the contract's metric lines out of stdout. Missing keys are simply absent, so a
+    partial report degrades rather than raising."""
     out = {}
     for key, rx in METRIC_RES.items():
         m = rx.findall(stdout)

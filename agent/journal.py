@@ -65,6 +65,7 @@ class Node:
 
 class Journal:
     def __init__(self):
+        """An empty tree. EDA findings and the citation registry accumulate as the run goes."""
         self.nodes: List[Node] = []
         self.t0 = time.time()
         # Findings from the one EDA pass, injected into every later planner call.
@@ -108,28 +109,36 @@ class Journal:
                     self.citation_registry[key]['used_in'] = outcome
 
     def __len__(self):
+        """How many nodes exist, which is how many iterations have been spent."""
         return len(self.nodes)
 
     def append(self, node: Node) -> Node:
+        """File a finished node and hand it back."""
         self.nodes.append(node)
         return node
 
     def get(self, node_id: int) -> Optional[Node]:
+        """The node with this id, or None."""
         return next((n for n in self.nodes if n.id == node_id), None)
 
     @property
     def good_nodes(self) -> List[Node]:
+        """Nodes that ran and produced a score. Crashes and the EDA pass are excluded."""
         return [n for n in self.nodes if not n.is_buggy and n.val_primary is not None]
 
     @property
     def drafts(self) -> List[Node]:
+        """Independent solutions written so far, which decides when drafting gives way to
+        greedy improvement."""
         return [n for n in self.nodes if n.operation == 'draft']
 
     def has_operation(self, op: str) -> bool:
+        """Whether some node ran this operation successfully. Gates the once-only phases."""
         return any(n.operation == op and not n.is_buggy for n in self.nodes)
 
     @property
     def accepted_nodes(self) -> List[Node]:
+        """Scoring nodes that passed every acceptance gate."""
         return [n for n in self.good_nodes if n.accepted]
 
     @property
@@ -200,6 +209,7 @@ class Journal:
         return '\n'.join(lines)
 
     def to_jsonl(self, path: str):
+        """Dump the whole tree, one node per line."""
         with open(path, 'w') as fh:
             for n in self.nodes:
                 fh.write(json.dumps(dataclasses.asdict(n)) + '\n')

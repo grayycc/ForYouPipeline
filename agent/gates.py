@@ -1,13 +1,9 @@
 """Deterministic validation of a proposed experiment. No LLM involved.
 
-The model proposes; this decides what is admissible. Everything here is a question plain code
-can answer better than a model can -- "does this touch a protected file", "have we tried this
-already", "is there a falsification condition" -- so asking a model would be slower, costlier
-and less reliable.
+The model proposes; plain code decides what is admissible, because every question here --
+protected file, already tried, falsifiable -- is one code answers more reliably.
 
-Gates never stall the run. A rejected spec is replanned once; if the replan also fails the
-orchestrator proceeds and records the warning, because a stuck loop is worse than a flawed
-experiment.
+Gates never stall the run: a rejected spec is replanned once, then proceeds with a warning.
 """
 import re
 from typing import List, Tuple
@@ -20,10 +16,12 @@ _MIN_FIELD_CHARS = 15
 
 
 def _normalise(text: str) -> str:
+    """Lowercase, strip punctuation, so wording differences do not hide a repeat."""
     return re.sub(r'[^a-z0-9 ]+', ' ', text.lower()).strip()
 
 
 def _token_set(text: str) -> set:
+    """Content words over three characters, used to compare two proposals."""
     return {t for t in _normalise(text).split() if len(t) > 3}
 
 
@@ -81,18 +79,13 @@ def check_spec(spec: ExperimentSpec, journal) -> Tuple[bool, List[str]]:
 
 
 def _jaccard(a: set, b: set) -> float:
+    """Overlap of two token sets, 0.0 when either is empty."""
     return len(a & b) / max(len(a | b), 1) if a and b else 0.0
 
 
-# A repeat is the same mechanism carried out the same way. Tag equality was the old test and it
-# missed the obvious case: per-video rate bucketing followed by per-author rate bucketing is one
-# experiment run twice, and the tags differed by a single word so it went through.
-#
-# The implementation threshold is deliberately the binding one. Two experiments can share a
-# mechanism and still be different experiments when the encoding differs -- a sampled
-# approximation versus an exact computation is a real second question, not a repeat, and
-# retiring a mechanism on one implementation is how a good direction gets abandoned. So this
-# fires only when the *change itself* is close, not merely when the motivation is.
+# A repeat is the same mechanism carried out the same way, so the implementation threshold is
+# the binding one. Two experiments sharing a mechanism can still differ: a sampled
+# approximation versus an exact computation is a real second question, not a repeat.
 _IMPL_OVERLAP = 0.60
 _TAG_OVERLAP = 0.40
 _MECH_OVERLAP = 0.50

@@ -1,14 +1,10 @@
-"""Reflect on the last result and decide the next experiment. Produces an ExperimentSpec.
+"""Reflect on the last result and choose the next experiment, as an ExperimentSpec.
 
-Reflection and planning are one call rather than two: a reflection written separately only
-reaches the next iteration as a summary line, whereas here the analysis of what just happened
-is the reasoning that selects what happens next.
+Reflection and planning are one call: the analysis of what just happened is the reasoning
+that selects what happens next. Three candidates are weighed before one is chosen, so the
+first plausible idea does not win by default.
 
-The Planner is asked for three brief candidates before committing to one. That costs little
-and stops the first plausible idea from winning by default.
-
-It holds the search tool. It is not told which methods to consider -- identifying what is
-worth trying, and why, is the work being graded.
+This role holds the search tool. It is never told which methods to consider.
 """
 from .. import config, research
 from ..spec import parse_spec
@@ -105,6 +101,8 @@ def run(llm, iteration, journal, drafting: bool = False):
     searches = {'count': 0}
 
     def handle_tool(name, args):
+        """Run one literature search and register every paper it returned, so a citation can
+        only name something a real response contained."""
         if name != 'search_papers':
             return f'unknown tool {name!r}'
         searches['count'] += 1
@@ -127,6 +125,10 @@ def run(llm, iteration, journal, drafting: bool = False):
 
 
 def _build_prompt(iteration, journal, extra: str = '', drafting: bool = False) -> str:
+    """Assemble the planner's prompt: budget, EDA findings, prior attempts, the last result,
+    and either the current best solution to change or, when drafting, deliberately not it.
+    `extra` carries the gate's objections on a replan.
+    """
     best = journal.best
     last = journal.nodes[-1] if journal.nodes else None
 
@@ -193,6 +195,8 @@ def replan(llm, iteration, journal, reasons, drafting: bool = False):
     searches = {'count': 0}
 
     def handle_tool(name, args):
+        """Run one literature search and register every paper it returned, so a citation can
+        only name something a real response contained."""
         if name != 'search_papers':
             return f'unknown tool {name!r}'
         searches['count'] += 1
@@ -214,6 +218,8 @@ def replan(llm, iteration, journal, reasons, drafting: bool = False):
 
 
 def _describe(node) -> str:
+    """The most recent node written out for the planner: what it scored, how far it drifted
+    from train, whether it was accepted, or why it failed."""
     if node.is_buggy:
         return (f'node {node.id} ({node.operation}) FAILED: {node.buggy_reason}'
                 + (f' ({node.exception_type})' if node.exception_type else '')
@@ -222,6 +228,7 @@ def _describe(node) -> str:
     # on a node that still scored. Formatting None here would raise inside prompt building,
     # which is outside the loop's LLM error handling and would end the run.
     def num(x):
+        """Format a metric, or say so when it was never reported."""
         return f'{x:.4f}' if isinstance(x, (int, float)) else 'not reported'
 
     bits = [f'node {node.id} ({node.operation})']

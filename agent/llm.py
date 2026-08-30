@@ -1,17 +1,11 @@
-"""Bedrock-backed LLM client: prompt caching, tool use, retry/backoff.
+"""Bedrock client: prompt caching, tool use, retry with backoff.
 
-Each role passes its own model, set independently in .env, so one role can be tuned without
-disturbing the others. Repeated API failure must degrade the run, never crash it.
+Each role passes its own model, so one can be tuned without disturbing the others, and
+repeated API failure degrades the run rather than crashing it.
 
-Two things here exist to control cost. The static task description is identical on every call,
-so it sits behind an explicit cache_control breakpoint -- explicit rather than top-level
-automatic, because the legacy Bedrock integration rejects the top-level form with a 400. And
-the tool loop is capped, since every round-trip resends the whole conversation.
-
-The cap is enforced by answering the tool call with a refusal, never by removing `tools` from
-the request. Withdrawing the schema from a conversation that already contains tool_use and
-tool_result blocks leaves the model holding results it can no longer account for, and it ends
-the turn with zero content blocks. That cost five of ten iterations in run smoke10.
+The task description sits behind an explicit cache_control breakpoint -- explicit because the
+legacy Bedrock integration rejects the top-level form with a 400. The tool loop is capped by
+what the handler replies, never by removing `tools`; see the comment on BUDGET_SPENT.
 """
 import random
 import time
@@ -35,6 +29,7 @@ MAX_TOOL_TURNS = 8
 
 class LLMClient:
     def __init__(self):
+        """Counters for the run's resource report. The client itself is built lazily."""
         self.total_in = 0
         self.total_out = 0
         self.cache_reads = 0
@@ -43,6 +38,7 @@ class LLMClient:
         self._client = None
 
     def _ensure(self):
+        """Build the Bedrock client on first use, failing loudly if .env is incomplete."""
         if self._client is not None:
             return
         from anthropic import AnthropicBedrock
@@ -67,6 +63,7 @@ class LLMClient:
         return blocks
 
     def _account(self, response):
+        """Add one response's token usage to the run totals, cache hits included."""
         u = response.usage
         self.total_in += u.input_tokens
         self.total_out += u.output_tokens

@@ -1,11 +1,10 @@
-"""The loop. Selects the next operation, sequences the roles, records what happened.
+"""The loop: selects the next operation, sequences the roles, records what happened.
 
-Greedy search over a tree of experiments. Every improvement branches from the current best
-node, so a bad idea costs one node rather than the run and the search can never get stuck.
+Greedy search over a tree of experiments. Improvement branches from the current best node, so
+a bad idea costs one node rather than the run.
 
-This module never builds a prompt or calls a model directly -- roles do that. What lives here
-is the ordering, the accept/reject decision, and the bookkeeping, all of which plain code does
-more reliably than a model would.
+Nothing here builds a prompt or calls a model -- roles do that. This module owns the ordering,
+the accept/reject decision, and the bookkeeping.
 """
 import json
 import os
@@ -53,6 +52,8 @@ def _read_submission_scores(path: str):
 
 class Agent:
     def __init__(self, run_id: str, seed: int = 0):
+        """One run, writing everything under runs/<run_id>. `seed` fixes the search's own
+        randomness -- which buggy leaf to debug -- not the solutions'."""
         self.run_dir = os.path.join(config.RUNS_DIR, run_id)
         self.nodes_dir = os.path.join(self.run_dir, 'nodes')
         os.makedirs(self.nodes_dir, exist_ok=True)
@@ -64,14 +65,15 @@ class Agent:
         self._splits_cache = None
 
     def _splits(self):
-        """The date-sliced data, loaded once. Needed to score an ensembled submission."""
+        """The date-sliced data, loaded once and cached. Needed to score an ensemble."""
         if self._splits_cache is None:
             from data import load
             self._splits_cache = load(config.DATA_DIR)
         return self._splits_cache
 
     def write_dummy_submissions(self):
-        """Always keep a valid submission on disk, from before the first iteration."""
+        """Write placeholder submissions before iteration 0, so the run always has a
+        schema-valid file on disk even if every experiment fails."""
         from data import load
         from submit import write_submission
         splits = load(config.DATA_DIR)
@@ -103,6 +105,11 @@ class Agent:
         return 'improve', j.best
 
     def step(self, iteration: int) -> Node:
+        """One iteration: pick an operation, generate a solution, run it, score and file it.
+
+        Every exit path appends exactly one node, so a failure costs an iteration rather than
+        the run.
+        """
         t_iter = time.time()
         op, parent = self.select()
         print(f'\n=== iteration {iteration} | {op}'
@@ -169,6 +176,7 @@ class Agent:
         return node
 
     def _finish(self, node, t_iter):
+        """Close a node out: stamp its wall time, file it in the journal, log it, report it."""
         node.wall_seconds = time.time() - t_iter
         self.journal.append(node)
         self.journal.note_citation_outcome(node)
@@ -176,15 +184,19 @@ class Agent:
         self._report(node)
 
     def _generate_baseline(self, node, iteration):
+        """Iteration 0: the agent writes its own pipeline and checks it against the published
+        baseline score."""
         node.hypothesis, node.code, ti, to = baseline_role.run(
             self.llm, iteration, self.journal)
         node.tokens_in, node.tokens_out = ti, to
 
     def _generate_eda(self, node, iteration):
+        """The one data-inspection pass. Produces findings for later planners, not a score."""
         node.hypothesis, node.code, ti, to = eda_role.run(self.llm, iteration, self.journal)
         node.tokens_in, node.tokens_out = ti, to
 
     def _generate_debug(self, node, iteration, parent):
+        """Repair a failed node, keeping its spec so the experiment still tests what it meant to."""
         node.spec = parent.spec
         node.hypothesis, node.code, ti, to = debugger_role.run(
             self.llm, iteration, self.journal, parent)
@@ -251,6 +263,8 @@ class Agent:
                 print('  [review] still flagged -- will run, but cannot become best')
 
     def _validate_submissions(self, node, node_dir):
+        """Both submissions must pass the official checker. A node that scores well and writes a
+        malformed file is worth nothing, so treat it as buggy."""
         ok_v, msg_v = executor.check_submission(
             os.path.join(node_dir, 'submission_valid.csv'), 'valid')
         ok_t, msg_t = executor.check_submission(
@@ -261,6 +275,7 @@ class Agent:
             node.stderr_tail = (node.stderr_tail + '\n' + msg_v + '\n' + msg_t).strip()
 
     def _apply_result(self, node: Node, res: dict):
+        """Copy one execution's metrics and outcome onto the node."""
         m = res['metrics']
         node.train_primary = m.get('train_primary')
         node.val_gauc = m.get('val_gauc')
@@ -296,22 +311,14 @@ class Agent:
               f'{config.SANITY_FLOOR} -- treating as a bug, sending to the debugger')
 
     def _confirm_seeds(self, node: Node, code_path: str, node_dir: str):
-        """Re-run a promising candidate on the remaining seeds, then combine them.
+        """Re-run the node on the remaining seeds and rank-average them into its submission.
 
-        Each seed used to write over the previous seed's submission in this directory, so the
-        node reported the mean of three scores while shipping whichever model happened to run
-        last. Two models were trained and thrown away every time.
+        Seeds live in their own directories so none overwrites another. The metric ranks rows
+        within a user, so the combined prediction scores higher than the mean of the separate
+        scores -- each seed's random error cancels against the others.
 
-        They are now kept in per-seed directories and rank-averaged into the node's submission.
-        The metric ranks rows within a user, so the score of the combined prediction is not the
-        mean of the separate scores -- each model's random error cancels against the others and
-        the combination beats every seed that went into it.
-
-        Every scoring node gets this, not only ones already close to the best. Confirming only
-        the leaders meant a single-seed challenger was compared against an ensembled incumbent
-        and measured about 0.0016 short, so the bar rose and nothing else could reach it. The
-        spec puts compute deliberately outside the binding constraints -- a run uses roughly 5%
-        of the wall-clock ceiling -- so the fair comparison is worth two extra training runs.
+        Every scoring node gets this. Confirming only the leaders compared a single-seed
+        challenger against an ensembled incumbent, which raised the bar unfairly.
         """
         print(f'  [confirm] {node.val_primary:.4f} on seed {config.CONFIRM_SEEDS[0]} -- '
               f'running {len(config.CONFIRM_SEEDS) - 1} more')
@@ -396,6 +403,8 @@ class Agent:
         return evaluate([r[1] for r in rows], [r[6] for r in rows], out['valid'])
 
     def _accept(self, node: Node) -> bool:
+        """Whether this node becomes the new best. It must run, beat the incumbent, survive
+        the leakage reviewer, and hold its gain on randomly-exposed traffic."""
         if node.is_buggy or node.val_primary is None:
             return False
         if node.review_verdict == 'LEAK':
@@ -416,6 +425,8 @@ class Agent:
         return True
 
     def _promote(self, node: Node, node_dir: str):
+        """Copy a newly accepted node's submissions and source to the run's best_* files, so a
+        valid submission is always on disk even if the run dies mid-iteration."""
         for split in ('valid', 'test'):
             src = os.path.join(node_dir, f'submission_{split}.csv')
             if os.path.exists(src):
@@ -424,6 +435,7 @@ class Agent:
                     os.path.join(self.run_dir, 'best_solution.py'))
 
     def _log(self, node: Node):
+        """Append one node to log.jsonl, the graded record of what was tried and why."""
         spec = node.spec or {}
         parent = self.journal.get(node.parent_id) if node.parent_id is not None else None
         rec = {
@@ -464,6 +476,7 @@ class Agent:
             fh.write(json.dumps(rec) + '\n')
 
     def _report(self, node: Node):
+        """Print the one-line human summary of a finished node."""
         if node.is_buggy:
             print(f'  -> BUGGY ({node.buggy_reason}) in {node.exec_time:.0f}s')
         elif node.val_primary is None:
@@ -479,6 +492,8 @@ class Agent:
                   f'[{node.seeds_averaged} seed(s)] {tag}')
 
     def run(self, max_iterations: int = None):
+        """The loop. Stops on convergence, the iteration cap, or the wall-clock ceiling,
+        and writes summary.json whichever way it ends."""
         max_iterations = max_iterations or config.MAX_ITERATIONS
         self.write_dummy_submissions()
         for i in range(max_iterations):
@@ -497,6 +512,8 @@ class Agent:
         self.write_summary()
 
     def write_summary(self):
+        """summary.json: the run's headline result plus the resource figures the write-up
+        reports -- tokens, wall clock, iterations used."""
         best = self.journal.best
         scoring = self.journal.good_nodes
         summary = {

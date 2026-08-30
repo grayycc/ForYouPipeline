@@ -1,10 +1,8 @@
-"""Iteration 0: the agent stands up its own pipeline and confirms it reaches the baseline.
+"""The agent stands up its own pipeline and confirms it reaches the published baseline.
 
-This is an LLM call rather than the harness simply running kit/baseline.py, for two reasons.
-Task Requirement #1 asks the *agent* to build the pipeline and verify it, and doing that by
-hand forfeits the credit. More practically, kit/ is read-only, so without this the tree has no
-root the Coder is allowed to edit -- every later iteration would have to write a full pipeline
-from scratch anyway.
+An LLM call rather than the harness running kit/baseline.py: the task asks the *agent* to
+build and verify the pipeline, and kit/ is read-only, so without this the tree has no root the
+coder is allowed to edit.
 """
 from .. import config
 from . import base
