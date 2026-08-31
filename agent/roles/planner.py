@@ -169,6 +169,17 @@ result at the price of a testable one. State your expected effect honestly and, 
 below 0.002, prefer the candidate whose effect would be large enough to see. Being wrong about
 a big change teaches more than being right about an invisible one.
 
+**You have fewer iterations than the cap suggests, so weight the early ones accordingly.**
+The run ends when the best score stops improving by more than 0.002 across consecutive scoring
+iterations, and on this task that has ended every recent run after four to eight of them --
+against a cap of fifty and using under a quarter of the wall-clock ceiling. What you have
+accumulated by roughly the fourth scoring node is, in practice, the final result. Two runs
+illustrate the cost of pacing: one reached +0.0023 at its second scoring node and kept going;
+another reached the same total but split across two nodes, stood at +0.00197 at the fourth, and
+stopped there — three hundred-thousandths short. If several changes are each individually
+below the floor and you have reason to think they compose, proposing them as one change is
+both more measurable and leaves the search alive longer than spending an iteration on each.
+
 Whatever you change must live inside the standalone solution file itself, including any feature
 logic, computed from train-only history when relevant.
 

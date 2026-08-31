@@ -401,6 +401,16 @@ class Agent:
                       f'float -- the solution ignores --seed, so the remaining seeds would '
                       f'repeat it. Skipping them; this score is NOT seed-confirmed.')
                 break
+
+            # Two seeds that agree within one seed-std are consistent with ordinary noise, and
+            # the third would move the mean by a fraction of EPSILON. Stopping here buys back a
+            # third of the confirmation cost, which is what an internally-ensembled node spends
+            # most of its wall clock on. See CONFIRM_EARLY_STOP_SPREAD.
+            spread = abs(node.seed_scores[1] - node.seed_scores[0])
+            if len(node.seed_scores) == 2 and spread <= config.CONFIRM_EARLY_STOP_SPREAD:
+                print(f'    seeds agree to {spread:.5f} (<= {config.CONFIRM_EARLY_STOP_SPREAD}) '
+                      f'-- consistent with ordinary seed noise, third seed skipped')
+                break
             # The unbiased score is averaged over the same seeds. Leaving it at the seed-0 value
             # while averaging validation compares a noisy number against a smoothed one, and the
             # gate then rejects on noise -- which is what happened to every candidate in v2.

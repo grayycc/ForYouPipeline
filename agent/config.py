@@ -122,6 +122,21 @@ MAX_DEBUG_DEPTH = 2               # abandon a branch after 2 failed fixes (playb
 CONFIRM_SEEDS = [0, 1, 2]
 CONFIRM_TRIGGER = EPSILON / 2     # re-run with more seeds once a node is within noise of beating best
 
+# Stop confirming early when the first two seeds already agree this closely. Most of the value
+# of averaging is in the second sample: with a per-seed std of SEED_STD, the standard error of
+# the mean goes 0.00080 -> 0.00057 (one extra seed, a 29% cut) -> 0.00046 (two, a further 19%).
+# When the two samples agree to within one std they are consistent with ordinary seed noise and
+# the third moves the mean very little -- measured on runs/v11, dropping the third seed shifts
+# the mean by 0.00005, 0.00017 and 0.00018 on its three confirmed nodes, all under a tenth of
+# EPSILON. Disagreement beyond this means the spread is wider than expected and the third seed
+# is worth buying, so the check is on agreement rather than a flat reduction to two seeds.
+#
+# This exists to pay for ensembles rather than to save time as such. A node that ensembles
+# internally is re-run in full for every confirm seed, so confirmation is where the wall-clock
+# actually goes: runs/v9-v11 used 8-21% of the 6h ceiling and 10-16% of the 50-iteration cap,
+# and the convergence rule, not compute, is what ends those runs.
+CONFIRM_EARLY_STOP_SPREAD = SEED_STD
+
 # The unbiased metric's noise is not the validation metric's noise. The random-exposure set is
 # 288,338 rows in which ~63% of users have no positive, so its GAUC rests on far fewer users and
 # spreads wider across seeds. Borrowing SEED_STD (a validation-set figure) as the tolerance

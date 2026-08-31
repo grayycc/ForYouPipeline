@@ -1,0 +1,54 @@
+{
+  "iterations_used": 7,
+  "iteration_cap": 50,
+  "converged_at_iteration": 6,
+  "convergence_epsilon": 0.002,
+  "convergence_n": 3,
+  "min_iterations_before_convergence": 0,
+  "manual_interventions": 0,
+  "total_tokens_in": 262052,
+  "total_tokens_out": 96083,
+  "total_tokens": 358135,
+  "cache_read_tokens": 143631,
+  "cache_write_tokens": 108410,
+  "literature_searches": 6,
+  "papers_seen": 10,
+  "agent_wall_clock_seconds": 2386.6,
+  "gpu_hours": 0.0,
+  "buggy_nodes": 0,
+  "scoring_candidates_evaluated": 6,
+  "baseline_valid_primary": 0.6016,
+  "best_node_id": 4,
+  "best_valid_primary": 0.60415,
+  "best_valid_gauc": 0.6712,
+  "best_valid_ndcg5": 0.5373,
+  "best_train_primary": 0.6415,
+  "best_unbiased_primary": 0.3653,
+  "unbiased_gate_tolerance": 0.003,
+  "draft_nodes": 0,
+  "final_refit_train_plus_valid": "applied",
+  "delta_vs_baseline": 0.00255,
+  "best_seeds_averaged": 2,
+  "accepted_trajectory": [
+    {
+      "iter": 0,
+      "val_primary": 0.60135,
+      "unbiased": 0.3628
+    },
+    {
+      "iter": 2,
+      "val_primary": 0.60195,
+      "unbiased": 0.3639
+    },
+    {
+      "iter": 3,
+      "val_primary": 0.60395,
+      "unbiased": 0.3647
+    },
+    {
+      "iter": 4,
+      "val_primary": 0.60415,
+      "unbiased": 0.3653
+    }
+  ]
+}

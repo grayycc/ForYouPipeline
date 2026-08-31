@@ -32,6 +32,14 @@ This is NOT leakage, and you must not flag it:
   are disjoint.
 - expanding-window or as-of-date statistics that exclude the current row
 - using the training labels to fit model parameters. That is training, not leakage.
+- **auxiliary training targets.** A multi-task model that predicts `long_view` *and* a second
+  post-interaction column (`is_click`, `is_like`, `play_time_ms`, ...) from shared embeddings is
+  correct, provided the auxiliary column is only ever a *target* and never an input feature. Ask
+  what the model receives as input for the row it is scoring: if the answer does not include the
+  auxiliary column, there is nothing to flag. Reading `is_click` out of the training rows to
+  build a second loss term is training on labels, exactly as the line above allows. It becomes
+  leakage only if the value is fed in as a feature, or if the auxiliary head's output for an
+  evaluation row is computed from that row's own post-interaction values.
 - the model scoring validation rows at evaluation time
 - **the `--train_split train+valid` branch.** This mode runs once, after the run has converged,
   and its only output is `submission_test.csv`. Fitting statistics on train+valid and applying
@@ -195,4 +203,3 @@ def _is_the_refit_branch(reason: str) -> bool:
                            or 'validation score' in low or 'reports a validation' in low
                            or 'val_primary' in low)
     return about_refit and about_test and not alleges_val_scoring
-

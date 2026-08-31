@@ -448,7 +448,14 @@ def cross_run_yield(runs_dir='runs', exclude_run=None, min_attempts=3):
         out.append({'family': fam, 'n': n, 'accepted': rec['accepted'],
                     'median': _st.median(rec['deltas']), 'best': max(rec['deltas']),
                     'runs': len(rec['runs'])})
-    out.sort(key=lambda r: -r['median'])
+    # Ordered by the best result each family ever produced, not by its median. The run keeps one
+    # checkpoint, so what matters is whether a family can produce a win at all -- a high-variance
+    # family that occasionally lands the ceiling is worth more than a reliable family that never
+    # exceeds it. Sorting by median buried exactly that case: the ranking-objective row reads
+    # median -0.00137, which scans as "this loses", while the same row's best is +0.00260 -- the
+    # highest score any run has reached, a BPR model since verified to reproduce at 0.6043 across
+    # three independent seed sets. Three runs after it was found, no winner used BPR again.
+    out.sort(key=lambda r: -r['best'])
     return out
 
 
@@ -463,6 +470,11 @@ def cross_run_block(runs_dir='runs', exclude_run=None) -> str:
              'Pooled over previous runs of this agent on this split, so it carries evidence '
              'this run has not paid for. Delta is against the official baseline; the noise '
              f'floor is {config.EPSILON}.',
+             '',
+             'Ordered by **best**, not median. You keep one checkpoint, so a mechanism that '
+             'sometimes reaches the ceiling is worth more than one that reliably lands just '
+             'under it — read the median as how often it works and the best as how high it '
+             'goes, and do not dismiss a family on its median alone.',
              '',
              '| mechanism | attempts | accepted | median delta | best delta | seen in N runs |',
              '|---|---|---|---|---|---|']

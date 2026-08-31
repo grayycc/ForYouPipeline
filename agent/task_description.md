@@ -123,9 +123,55 @@ that submission would have collapsed on the hidden test set. Any feature derived
 columns for the row being scored is leakage, including ratios, differences and clipped versions
 of them.
 
-They are legitimate in exactly one direction: aggregated over a user's or a video's **strictly
-past** rows to describe *history*, never the current row. `duration_ms`, `tab`, `date`,
-`hourmin` and the IDs are known before the impression and are safe.
+That prohibition is on using them as **features**. There are two other directions, and both are
+legitimate:
+
+1. **Aggregated over a user's or a video's strictly past rows, as history.** Never the current
+   row. `duration_ms`, `tab`, `date`, `hourmin` and the IDs are known before the impression and
+   are safe as ordinary features.
+
+2. **As auxiliary training targets — a second thing the model is trained to predict.** This is
+   not leakage and it is explicitly permitted: fitting parameters on training labels *is*
+   training. The test is what the model receives as *input* at scoring time. A multi-task model
+   that predicts `long_view` and `is_click` from the same shared embeddings takes neither label
+   as an input; it is scored through the `long_view` head alone, and the auxiliary head can be
+   discarded after training.
+
+   **This is the largest measured, untried signal in the dataset.** Over 400,000 training rows:
+
+   | auxiliary label | P(long_view \| label=1) | P(long_view \| label=0) | lift |
+   |---|---|---|---|
+   | `is_click` | 0.7226 | **0.0030** | +0.7196 |
+   | `is_profile_enter` | 0.7603 | 0.3215 | +0.4389 |
+   | `is_comment` | 0.8859 | 0.3309 | +0.5550 |
+   | `is_like` | 0.6619 | 0.3262 | +0.3357 |
+
+   `long_view` almost never occurs without a click — 0.3% against 72% — so `is_click` is close
+   to a necessary condition for the label, and it is far better balanced (46% positive against
+   `long_view`'s 33%). Each training row can therefore carry two supervision signals instead of
+   one, which matters here because the ~44 training rows per user leave the user embeddings
+   weakly determined. `play_time_ms` is usable the same way, as a regression target.
+
+   Across every run so far this has been proposed **once**, in an early run, and the current
+   framing of this section is why: it previously said these columns were legitimate "in exactly
+   one direction", which foreclosed it. Treat it as open.
+
+   **Do not hand-roll the label loading — import it.** The one hard part is alignment: the
+   target array must line up row-for-row with `load(data_dir)['train']`, and a misaligned target
+   does not crash. It trains, scores plausibly, and quietly teaches the shared embeddings noise.
+   `kit/aux_labels.py` does it, and `tests/test_aux_labels.py` asserts the alignment against the
+   raw file rather than claiming it in a comment:
+
+   ```python
+   from aux_labels import train_aux_labels, BINARY, CONTINUOUS
+
+   clicks = train_aux_labels(data_dir, 'is_click')          # 0.0/1.0, len == len(splits['train'])
+   watch  = train_aux_labels(data_dir, 'play_time_ms')      # log1p-scaled, for a regression head
+   ```
+
+   It opens only the train-window file, so no evaluation row's post-interaction value can reach
+   the model by any path. `BINARY` and `CONTINUOUS` list what is available; `long_view` is
+   rejected, since that is the main label rather than an auxiliary one.
 | `log_random_4_22_to_5_08_pure.csv` | **1,186,059 rows of randomly-exposed impressions** over the valid+test window. Videos here were shown at random rather than chosen by the production recommender, so metrics computed on it are not biased by the logging policy. |
 
 **Do not hand-roll the random-exposure scoring — import it.** `kit/unbiased.py` does the
@@ -259,16 +305,37 @@ These were measured by the organisers and by prior runs. Treat them as known.
     ranks rather than the raw scores. Averaging raw scores gave about half as much; the
     rank-space step is where most of it came from, because the metric only reads ordering.
 
-    **This has a real cost you should size against your own iteration budget.** A promising
-    node's whole script is re-run twice more to confirm the score on other seeds, so an
-    ensemble trained *inside* your script multiplies: a 5-model internal ensemble becomes up
-    to 15 model trainings for that one node, and one measured instance of this took ~19
-    minutes wall-clock for a model that otherwise trains in seconds. That is not wasted --
-    it produced the gain above -- but it is 15-20x a non-ensembled node's cost, so an
-    ensemble size chosen without this in mind can eat a large share of the wall-clock ceiling
-    for a handful of iterations.
+    **More models is monotonically better, and you have far more budget than you are using.**
+    Rank averaging reduces the variance of the ordering, and that reduction keeps improving
+    with ensemble size at a diminishing rate. The measured runs: 3 seeds gave 0.60363 and
+    0.60341, 5 seeds gave 0.60420. Treat the *size* of that difference as unestablished — the
+    5-seed figure was not seed-confirmed — but the direction matches the mechanism.
+
+    It does cost. A promising node's whole script is re-run to confirm the score on further
+    seeds, so an internal ensemble multiplies, and one 5-model node took ~19 minutes of
+    wall-clock for a model that trains in seconds. Size that against the real ceiling rather
+    than against a feeling: recent full runs used **8-21% of the 6h wall-clock ceiling and
+    10-16% of the 50-iteration cap**, and every one of them ended on the convergence rule, not
+    on budget. Compute is not the scarce resource here; iterations that clear the noise floor
+    are. An earlier version of this note warned about the cost without saying that, and the
+    run that read it chose 3 seeds over 5 and scored lower.
   - **Bayesian-smoothed per-video and per-author long-view rate, bucketed: +0.0008.** Computed
     from training rows only and smoothed toward the global rate so rare IDs are not trusted.
+  - **BPR pairwise loss, stacked on top of both of the above: 0.6043, the best score reached by
+    any run.** Replace the pointwise BCE gradient with a within-user pairwise one: for a
+    minibatch, take users holding at least one positive and one negative, sample a (pos, neg)
+    pair from each, and descend `-log(sigmoid(score_pos - score_neg))`. Architecture, features
+    and ensembling all unchanged.
+
+    This is worth stating carefully because the record around it is misleading. Pairwise and
+    listwise objectives *as a family* have a poor average here — 29 attempts, 17% accepted,
+    median −0.00137 — and BPR specifically has failed more often than it has worked. But its
+    successful configuration was re-run at three independent ensemble-seed offsets and scored
+    **0.6042 / 0.6044 / 0.6043**, so that result is reproducible to ±0.0002 rather than a lucky
+    draw. A mechanism can have a bad median and still hold the ceiling; you keep one checkpoint,
+    so the ceiling is what you are chasing. What distinguished the working version from the
+    failing ones was that it changed *only* the loss, on top of an already-good model, rather
+    than arriving alongside other changes.
   - Those two together account for +0.0024 of a best-ever +0.0025, and they compose: the
     ensembling result was measured on top of the smoothed-CTR model, not instead of it.
 - **A feature that is constant within a user contributes exactly zero.** Only the ordering

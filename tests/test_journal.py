@@ -115,3 +115,26 @@ def test_a_node_records_when_the_solution_ignored_the_seed():
     m = Node(id=2, parent_id=0, operation='improve')
     m.seed_scores = [0.6015, 0.6018]
     assert (m.seed_scores[1] == m.seed_scores[0]) is False
+
+
+def test_confirm_stops_early_only_when_the_first_two_seeds_agree():
+    """Most of the value of seed-averaging is in the second sample; the third moves the mean by
+    a fraction of EPSILON when the first two agree. Measured on runs/v11's confirmed nodes,
+    dropping the third seed shifts the mean by 0.00005 / 0.00017 / 0.00018."""
+    from agent import config
+    close = [0.602117, 0.602213, 0.602308]      # v11 node 2
+    wide = [0.6015, 0.6040, 0.6028]             # invented: spread far beyond seed noise
+
+    assert abs(close[1] - close[0]) <= config.CONFIRM_EARLY_STOP_SPREAD
+    assert abs(wide[1] - wide[0]) > config.CONFIRM_EARLY_STOP_SPREAD
+
+    mean2 = sum(close[:2]) / 2
+    mean3 = sum(close) / 3
+    assert abs(mean3 - mean2) < config.EPSILON / 10
+
+
+def test_identical_seeds_are_caught_before_the_agreement_check():
+    """A bit-identical second seed means --seed was ignored, which is a different finding from
+    'these two agree' and must not be silently absorbed by the early-stop path."""
+    scores = [0.6028, 0.6028]
+    assert scores[1] == scores[0]
