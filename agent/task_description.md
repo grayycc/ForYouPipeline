@@ -167,6 +167,23 @@ expected. What makes it useful is the comparison between your own runs, not its 
 There is no `fit`, no `train_batch`, and no epoch loop inside the class — you write the epoch
 loop yourself. Weights are the public attributes `V` (embeddings), `W` (first-order), `b`.
 
+**`step()` is hard-wired to pointwise BCE.** Its gradient is `g = (sigmoid(z) - y) / B`, so it
+cannot be reused for a pairwise or listwise loss — a different objective means writing the
+parameter update yourself. If you do, these are the optimiser attributes as they actually
+exist, and guessing them is a real failure mode: one run assumed `m_V, v_V, m_W, v_W, m_b, v_b`
+and died on `AttributeError: 'FM' object has no attribute 'm_b'` after training had begun.
+
+| attribute | what it is |
+|---|---|
+| `mV`, `vV` | Adam first/second moments for `V` (note: no underscore) |
+| `mW`, `vW` | Adam first/second moments for `W` |
+| `t` | Adam timestep, incremented once per `step()` |
+| `b` | the bias — a bare `float32` with **no** moments; `step()` updates it by plain SGD, `self.b -= self.lr * g.sum()` |
+
+So there is no `m_b`/`v_b` to reuse, and the moment names carry no underscore. Writing your own
+FM class with its own optimiser state is a clean alternative and has worked — but if you import
+this one and drive it manually, read `baseline.py` rather than assuming the layout.
+
 Log columns available beyond those `load()` exposes: `hourmin`, `time_ms`, `is_click`,
 `is_like`, `is_follow`, `is_comment`, `is_forward`, `is_hate`, `play_time_ms`,
 `profile_stay_time`, `comment_stay_time`, `is_profile_enter`, `is_rand`.
