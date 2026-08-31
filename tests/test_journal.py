@@ -12,9 +12,16 @@ from agent.journal import Journal, Node
 EPS, N = 0.002, 3
 
 
-def scoring(i, primary, parent=0, op='improve'):
+def scoring(i, primary, parent=0, op='improve', accepted=True):
+    """A node that ran and scored.
+
+    `accepted` defaults True because best_history tracks the accepted best: in the real loop a
+    node that raises the best-so-far is accepted by definition, and marking a non-improving one
+    accepted changes nothing, since the history is a running max. Rejection is exercised
+    explicitly in tests/test_diagnose.py.
+    """
     n = Node(id=i, parent_id=parent, operation=op)
-    n.is_buggy, n.val_primary = False, primary
+    n.is_buggy, n.val_primary, n.accepted = False, primary, accepted
     return n
 
 
@@ -75,3 +82,59 @@ if __name__ == '__main__':
             fn()
             print(f'  PASS  {name}')
     print('\nall journal tests passed')
+
+
+def test_floor_blocks_convergence_during_warm_up():
+    """The same four flat nodes that are genuine stagnation late in a run are just the
+    ordinary early state of a search. The floor is what separates the two cases, and it was
+    ending every real run at iteration 4 of 50 before it existed."""
+    j = build([scoring(0, 0.6014, None, 'baseline'),
+               scoring(1, 0.6015), scoring(2, 0.6016), scoring(3, 0.6018)])
+    assert j.has_converged(EPS, N), 'unchanged with no floor'
+    assert not j.has_converged(EPS, N, min_scoring_nodes=15), 'floor must suppress it'
+
+
+def test_floor_still_allows_convergence_once_met():
+    nodes = [scoring(0, 0.6014, None, 'baseline')]
+    nodes += [scoring(i, 0.6015) for i in range(1, 16)]
+    j = build(nodes)
+    assert j.has_converged(EPS, N, min_scoring_nodes=15), 'floor cleared, rule applies'
+
+
+def test_a_node_records_when_the_solution_ignored_the_seed():
+    """runs/v10 spent 51% of its wall clock re-running scripts whose ensembles hardcoded
+    `for s in range(N_SEEDS)`, so every confirm seed returned a bit-identical score and the
+    seed-averaging it paid for could not have detected a lucky draw."""
+    from agent.journal import Node
+    n = Node(id=1, parent_id=0, operation='improve')
+    assert n.ignores_seed is False
+    n.seed_scores = [0.6028, 0.6028]
+    n.ignores_seed = n.seed_scores[1] == n.seed_scores[0]
+    assert n.ignores_seed is True
+
+    m = Node(id=2, parent_id=0, operation='improve')
+    m.seed_scores = [0.6015, 0.6018]
+    assert (m.seed_scores[1] == m.seed_scores[0]) is False
+
+
+def test_confirm_stops_early_only_when_the_first_two_seeds_agree():
+    """Most of the value of seed-averaging is in the second sample; the third moves the mean by
+    a fraction of EPSILON when the first two agree. Measured on runs/v11's confirmed nodes,
+    dropping the third seed shifts the mean by 0.00005 / 0.00017 / 0.00018."""
+    from agent import config
+    close = [0.602117, 0.602213, 0.602308]      # v11 node 2
+    wide = [0.6015, 0.6040, 0.6028]             # invented: spread far beyond seed noise
+
+    assert abs(close[1] - close[0]) <= config.CONFIRM_EARLY_STOP_SPREAD
+    assert abs(wide[1] - wide[0]) > config.CONFIRM_EARLY_STOP_SPREAD
+
+    mean2 = sum(close[:2]) / 2
+    mean3 = sum(close) / 3
+    assert abs(mean3 - mean2) < config.EPSILON / 10
+
+
+def test_identical_seeds_are_caught_before_the_agreement_check():
+    """A bit-identical second seed means --seed was ignored, which is a different finding from
+    'these two agree' and must not be silently absorbed by the early-stop path."""
+    scores = [0.6028, 0.6028]
+    assert scores[1] == scores[0]

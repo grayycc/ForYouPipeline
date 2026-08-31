@@ -75,3 +75,26 @@ if __name__ == '__main__':
             print(f'  {name}: wanted {exp}, got {got} -- {reason[:150]}')
         raise SystemExit(1)
     print(f'\nall {len(CASES)} reviewer cases correct')
+
+
+def test_the_refit_branch_scoring_test_rows_is_not_a_leak():
+    """The v6 smoke run blocked its best node (0.6022) on "validation rows must not be included
+    in any aggregate used to score test rows" -- which is not the rule. The test window follows
+    validation, so train+valid statistics are strictly past for every test row, and the SYSTEM
+    prompt says exactly that. Three rounds of prompt wording have failed to hold this, and the
+    branch cannot affect the validation score that selects the submission anyway."""
+    from agent.roles import reviewer
+    smoke = ('In the `train+valid` branch, video_rate_tv = compute_video_stats(all_train_rows) '
+             'computes video long_view rates from the combined train+valid split. These rates '
+             'are then applied to score test rows via X_test_tv. This leaks validation-window '
+             'information into test-window scores.')
+    assert reviewer._is_the_refit_branch(smoke)
+
+    # the one real defect available in that branch must still block
+    scores_val = ('The train+valid branch also computes a validation score and prints it as '
+                  'VAL_PRIMARY, so validation is scored with statistics fitted on validation.')
+    assert not reviewer._is_the_refit_branch(scores_val)
+
+    ordinary = ("Lines 46-48 aggregate splits['valid'] labels into a feature used to score "
+                "validation rows.")
+    assert not reviewer._is_the_refit_branch(ordinary)

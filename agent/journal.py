@@ -10,6 +10,32 @@ from typing import Dict, Optional, List
 WORST = -1.0  # buggy nodes get this so they can never become "best"
 
 
+def rank_key(node):
+    """How two candidates are ordered: by validation score, full stop.
+
+    The challenge defines the selection rule for us -- "the submission scored for ranking is the
+    validation-best checkpoint" -- so ranking by anything else is scoring a different contest
+    than the one being judged.
+
+    This used to band validation into EPSILON-wide bins and break ties on the random-exposure
+    score, on the theory that within one band validation is only resolving noise. Two things
+    were wrong with that. The bands are absolute, so band 301 spans 0.6010-0.6030 -- which in
+    runs/v5 was the entire range of every good node the agent produced, making the tie-break the
+    *only* thing that mattered. And the tie-break points the wrong way: across v5's 15 scoring
+    nodes r(val, unbiased) = -0.33, because the hidden test set is a standard logged-exposure
+    split like validation, not a random-exposure one. Preferring the higher unbiased score
+    therefore prefers the model that will score worse on the metric being judged. Nodes 12, 13,
+    15 and 18 all beat the incumbent on validation and all four were rejected on that tie-break;
+    the run shipped +0.000267 instead of node 18's +0.00113.
+
+    The unbiased score keeps its job as a *veto* in Agent._accept -- a candidate whose
+    random-exposure score collapses relative to its parent is rejected outright. Guarding
+    against a distribution-shift collapse is what it was introduced for. Expressing a preference
+    between two scores that validation cannot separate is not.
+    """
+    return node.val_primary if node.val_primary is not None else WORST
+
+
 @dataclasses.dataclass
 class Node:
     id: int
@@ -33,14 +59,24 @@ class Node:
     unbiased_val_primary: Optional[float] = None
     seeds_averaged: int = 1
     seed_scores: List[float] = dataclasses.field(default_factory=list)
+    seed_unbiased_scores: List[float] = dataclasses.field(default_factory=list)
 
     # execution outcome
     is_buggy: bool = True               # guilty until proven otherwise
     buggy_reason: str = ''
     exception_type: Optional[str] = None
     stdout_tail: str = ''
+    # Declared, not merely assigned by the orchestrator. Every write to `stderr_tail` was a
+    # dynamic attribute set inside _apply_result, so any node that never reached it -- one whose
+    # generation raised, or whose submissions failed validation first -- had no such attribute,
+    # and both _validate_submissions and the planner's _describe read it unconditionally. That
+    # is an AttributeError in the middle of a long run, thrown by the error path.
+    stderr_tail: str = ''
     exec_time: float = 0.0
     submission_ok: bool = False
+    # Set when two confirm seeds returned a bit-identical score, which means the solution never
+    # read --seed. The averaged score is then a single sample wearing three hats.
+    ignores_seed: bool = False
 
     # loop bookkeeping
     accepted: bool = False
@@ -62,9 +98,16 @@ class Node:
 class Journal:
     def __init__(self):
         self.nodes: List[Node] = []
-        self.t0 = time.time()
+        # Monotonic: a laptop sleeping mid-run must not be counted as elapsed work.
+        self.t0 = time.monotonic()
         # Findings from the one EDA pass, injected into every later planner call.
         self.eda_findings: str = ''
+        # How far the unbiased score may fall before a change is called overfitting. Measured
+        # from the baseline's own seed spread rather than borrowed from the validation metric's
+        # std -- see config.UNBIASED_TOLERANCE_SIGMAS. None until the baseline resolves.
+        self.unbiased_tolerance: Optional[float] = None
+        # Rendered once by the orchestrator from prior runs' logs; see diagnose.cross_run_block.
+        self.cross_run_yield: str = ''
         # Every paper any search returned this run: id -> {title, outcome of prior use}.
         # Citations are checked against this, so the planner cannot cite a paper that no
         # real search returned.
@@ -115,7 +158,20 @@ class Journal:
 
     @property
     def good_nodes(self) -> List[Node]:
+        """Every node that produced a score. Used for counting work done, not for selection."""
         return [n for n in self.nodes if not n.is_buggy and n.val_primary is not None]
+
+    @property
+    def accepted_nodes(self) -> List[Node]:
+        """Nodes whose gain survived every gate. This is what `best` is drawn from.
+
+        A node rejected by the unbiased-exposure gate scored well on validation but was judged
+        not to be a real gain. Letting it into `best` would make it both the bar every later
+        node must clear and the branch point they grow from -- so one phantom gain suppresses
+        every genuine one behind it. That is what happened for ten iterations of runs/v2.
+        """
+        return [n for n in self.nodes
+                if n.accepted and not n.is_buggy and n.val_primary is not None]
 
     @property
     def drafts(self) -> List[Node]:
@@ -126,33 +182,72 @@ class Journal:
 
     @property
     def best(self) -> Optional[Node]:
-        good = self.good_nodes
-        return max(good, key=lambda n: n.score) if good else None
+        """Highest-ranking accepted node -- see `rank_key`."""
+        acc = self.accepted_nodes
+        return max(acc, key=rank_key) if acc else None
+
+    def outranks_best(self, node: Node) -> bool:
+        """Would this node take the incumbency? Asked before the node is appended.
+
+        The accept decision and the incumbency ordering have to be the same question, or a node
+        can be accepted, promoted over the best submission on disk, and then not actually be
+        `best` -- which is how runs/v3's node 16 (0.6028) would have overwritten node 15's
+        0.6035 submission.
+        """
+        best = self.best
+        return True if best is None else rank_key(node) > rank_key(best)
+
+    # Operations that only need to succeed once. Debugging a failed one after another attempt
+    # has already succeeded re-derives a result the run already holds.
+    ONE_SHOT_OPS = ('baseline', 'eda')
 
     def buggy_leaves(self) -> List[Node]:
-        """Buggy nodes nobody has tried to fix yet, still under the debug-depth cap."""
+        """Buggy nodes nobody has tried to fix yet, still under the debug-depth cap.
+
+        A failed node is only worth an iteration if its job is still undone. runs/v3 spent
+        iteration 12 debugging the baseline that had crashed at iteration 0 -- eleven iterations
+        after iteration 1 produced a working baseline -- and duly re-derived 0.6016, a number
+        the run already had. Drafts are exempt: they are exploration, so a crashed one is still
+        worth fixing even once other drafts have run.
+        """
         parents = {n.parent_id for n in self.nodes}
+        settled = {n.operation for n in self.nodes
+                   if not n.is_buggy and n.operation in self.ONE_SHOT_OPS}
         return [n for n in self.nodes
-                if n.is_buggy and n.id not in parents and n.debug_depth < 3]
+                if n.is_buggy and n.id not in parents and n.debug_depth < 3
+                and n.operation not in settled]
 
     def best_history(self) -> List[float]:
-        """Best-so-far validation primary after each *scoring* node, in order.
+        """Best-so-far *accepted* validation primary after each scoring node, in order.
 
         Nodes that produced no score are skipped: crashes, and the one-off EDA pass. Counting
         them flattens the window, so three consecutive failures would otherwise look identical
         to three experiments that failed to improve and fire convergence on their own.
+
+        The running best tracks accepted nodes only, matching `best`. A rejected node's score
+        is not progress, so it must not be able to end the run by looking like progress.
         """
         out, best = [], WORST
         for n in self.nodes:
             if n.is_buggy or n.val_primary is None:
                 continue
-            best = max(best, n.score)
+            if n.accepted:
+                best = max(best, n.score)
             out.append(best)
         return out
 
-    def has_converged(self, epsilon: float, n_required: int) -> bool:
-        """Converged when best-so-far hasn't improved by > epsilon over N scoring iterations."""
+    def has_converged(self, epsilon: float, n_required: int,
+                      min_scoring_nodes: int = 0) -> bool:
+        """Converged when best-so-far hasn't improved by > epsilon over N scoring iterations.
+
+        `min_scoring_nodes` is a floor on how much search must have happened before the rule
+        may fire at all. Without it, three consecutive experiments that fail to beat a strong
+        baseline -- the ordinary early state of a search -- are indistinguishable from a
+        genuine plateau, and the run ends around iteration 4 of 50.
+        """
         hist = self.best_history()
+        if len(hist) < min_scoring_nodes:
+            return False
         if len(hist) < n_required + 1:
             return False
         window = hist[-(n_required + 1):]
@@ -162,17 +257,21 @@ class Journal:
         """Compact prior-attempt table for prompts. Never send the whole tree (context cost)."""
         if not self.nodes:
             return '(no attempts yet)'
-        lines = ['| id | parent | op | val_primary | status | what was tried |',
-                 '|---|---|---|---|---|---|']
+        from . import diagnose
+        lines = ['| id | parent | op | val_primary | train | status | diagnosis | what was tried |',
+                 '|---|---|---|---|---|---|---|---|']
         for n in self.nodes[-limit:]:
             score = f'{n.val_primary:.4f}' if n.val_primary is not None else '--'
+            train = f'{n.train_primary:.4f}' if n.train_primary is not None else '--'
             status = (f'BUGGY({n.buggy_reason})' if n.is_buggy
                       else 'ACCEPTED' if n.accepted else 'rejected')
+            verdict = diagnose.classify(n, self)
             spec = n.spec or {}
             what = (spec.get('proposed_change') or n.hypothesis or n.plan or '')
             tags = ','.join(spec.get('tags') or [])
             desc = f'[{tags}] {what}'[:170].replace('\n', ' ') if tags else what[:170].replace('\n', ' ')
-            lines.append(f'| {n.id} | {n.parent_id} | {n.operation} | {score} | {status} | {desc} |')
+            lines.append(f'| {n.id} | {n.parent_id} | {n.operation} | {score} | {train} | '
+                         f'{status} | {verdict} | {desc} |')
         return '\n'.join(lines)
 
     def to_jsonl(self, path: str):

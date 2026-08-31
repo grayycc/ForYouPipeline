@@ -1,5 +1,7 @@
-# Dataset, downloaded from kuairand.com. 388MB, not tracked.
-KuaiRand-Pure/
+# Datasets, downloaded from kuairand.com. Never tracked -- Pure is 194MB, 1K is 4.3GB, 27K is
+# 46GB. This pattern is generic (KuaiRand-*) rather than naming each variant, since a naive
+# `git add -A` before this existed would have staged the entire 1K download.
+KuaiRand-*/
 data/
 *.tar.gz
 *.tar
@@ -38,3 +40,6 @@ runs/smoke*/
 
 # OS
 .DS_Store
+
+# Scratch strategy notes, kept out of the deliverable repo.
+notes/

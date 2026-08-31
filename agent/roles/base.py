@@ -17,6 +17,13 @@ CONTRACT_REMINDER = """
 Output contract: accept --data_dir/--out_dir/--seed; print TRAIN_PRIMARY=, VAL_GAUC=,
 VAL_NDCG5=, VAL_PRIMARY= and UNBIASED_PRIMARY= each on their own line; write
 submission_valid.csv and submission_test.csv into --out_dir; standard library and numpy only.
+
+Feature-generation rule: if you add new signals, create them inside the standalone solution
+itself using training-only history and the public metadata files. The agent is responsible for
+proposing the feature logic, not just tuning a fixed repo pipeline. Prefer causal preference
+signals (user × category affinity, user-topic matching, temporal history) over exposure-driven
+popularity proxies. Evaluate any improvement against both validation and the random-exposure set;
+features that help only ordinary logged traffic but reduce the unbiased score are rejected.
 """
 
 CODE_SYSTEM = """You write complete, runnable Python for a machine-learning experiment.

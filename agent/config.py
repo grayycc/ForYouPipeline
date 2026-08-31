@@ -37,7 +37,15 @@ def _env(name, default=None):
     return v if v else default
 
 
-DATA_DIR = os.path.join(REPO_ROOT, 'data', 'KuaiRand-Pure', 'data')
+_custom_data_dir = _env('DATA_DIR')
+if _custom_data_dir:
+    DATA_DIR = os.path.abspath(os.path.expanduser(os.path.expandvars(_custom_data_dir)))
+else:
+    DATA_DIR = os.path.join(REPO_ROOT, 'KuaiRand-Pure', 'data')
+    legacy_dir = os.path.join(REPO_ROOT, 'data', 'KuaiRand-Pure', 'data')
+    if not os.path.isdir(DATA_DIR) and os.path.isdir(legacy_dir):
+        DATA_DIR = legacy_dir
+
 RUNS_DIR = os.path.join(REPO_ROOT, 'runs')
 
 # Budget, from the problem statement.
@@ -48,6 +56,33 @@ WALL_CLOCK_CEILING_S = 6 * 3600   # backstop
 EPSILON = 0.002
 CONVERGENCE_N = 3
 
+# No floor: the challenge's convergence rule is applied literally, exactly as written --
+# converged when the validation best has not improved by more than EPSILON over the last
+# CONVERGENCE_N scoring iterations, whichever of that, the 50-iteration cap and the 6h ceiling
+# comes first.
+#
+# This was 30, and removing it is a deliberate choice to be rule-exact rather than to maximise
+# the score. Be clear about what it costs, because it is measured, not predicted. Replaying the
+# literal rule over every completed run:
+#
+#     v2  stops at node 6  ->  delta +0.00000   (actually shipped +0.00070)
+#     v3  stops at node 4  ->  delta +0.00000   (actually shipped +0.00160)
+#     v4  stops at node 5  ->  delta +0.00000   (actually shipped +0.00000)
+#     v5  stops at node 4  ->  delta +0.00000   (actually shipped +0.00040)
+#     v6  stops at node 4  ->  delta +0.00000   (actually shipped +0.00253)
+#
+# Every run stops before the search has produced anything, shipping the agent's own baseline
+# reproduction. The cause is not the floor and not the implementation: the rule fires whenever
+# the agent is not making jumps larger than EPSILON, and the largest single-step gain in any run
+# so far is +0.00087, roughly a quarter of the threshold. Iterations 2-4 are the mandatory
+# drafts, which start from a blank file and are reliably worse than the incumbent, so the window
+# is flat exactly when the rule first becomes checkable.
+#
+# The only real fix is a change worth more than EPSILON on its own; nothing about the stopping
+# rule can substitute for one. Setting this back to 30 restores the previous behaviour, and that
+# is a disclosed deviation that belongs in the README if it is used.
+MIN_ITERATIONS_BEFORE_CONVERGENCE = 0
+
 # Reference scores to measure against.
 BASELINE_VALID_PRIMARY = 0.6016
 BASELINE_TEST_PRIMARY = 0.5946
@@ -55,7 +90,31 @@ ORACLE_PRIMARY = 0.8645
 SEED_STD = 0.0008
 
 # Search policy.
-MIN_DRAFTS = 3                    # distinct fresh solutions before improve-only
+# No mandatory opening drafts. Measured across every run ever done: 1 of 26 drafts was ever
+# accepted (4%), and that one was in a throwaway smoke run -- the five real runs are 0-for-22.
+# They are also the worst nodes produced (0.4439 and 0.5242 against a 0.6015 baseline in v3) and
+# the source of the only label leak that ever reached a score (v7 node 3, play_time_ms, 0.8482).
+#
+# Worse, as an *opening* move they are actively harmful now that the convergence rule is
+# literal. A draft starts from a blank file, so it reliably scores below the incumbent, which
+# flattens the best-so-far window at exactly the iteration the epsilon/N rule first becomes
+# checkable. Replaying the rule with drafts removed moves v3 from +0.00000 to +0.00140 and v6
+# from +0.00000 to +0.00023.
+#
+# Drafts are not disabled -- STALL_NOISE_STREAK still forces one when the search plateaus, which
+# is the situation they are actually good for, and MAX_DRAFTS still caps them.
+MIN_DRAFTS = 0                    # distinct fresh solutions before improve-only
+
+# Escaping a plateau. `improve` only ever mutates the incumbent, so once the drafts are spent
+# the search has no way to make a large jump -- runs/v3 burnt its three drafts at iterations
+# 2-4, when the agent knew least, and then spent six of its twelve remaining improves adding
+# one more static item-side categorical to the same FM, every one inside the noise floor.
+# A run of results that all land in the noise is the signal that incremental variation on this
+# incumbent has stopped paying, and that a blank file is worth more than another edit.
+STALL_NOISE_STREAK = 4            # consecutive `noise` verdicts that count as a plateau
+STALL_DRAFT_COOLDOWN = 3          # iterations between forced drafts, so a plateau cannot
+                                  #   spend the whole budget drafting
+MAX_DRAFTS = 8                    # hard cap on drafts across the run
 DEBUG_PROBABILITY = 0.5           # chance of debugging a buggy leaf when one exists
 MAX_DEBUG_DEPTH = 2               # abandon a branch after 2 failed fixes (playbook: not 3)
 
@@ -63,9 +122,46 @@ MAX_DEBUG_DEPTH = 2               # abandon a branch after 2 failed fixes (playb
 CONFIRM_SEEDS = [0, 1, 2]
 CONFIRM_TRIGGER = EPSILON / 2     # re-run with more seeds once a node is within noise of beating best
 
-# Execution sandbox.
-EXEC_TIMEOUT_S = 900              # 15 min; baseline is ~40s, so this is generous
-EXEC_MEMORY_CAP_GB = 12
+# Stop confirming early when the first two seeds already agree this closely. Most of the value
+# of averaging is in the second sample: with a per-seed std of SEED_STD, the standard error of
+# the mean goes 0.00080 -> 0.00057 (one extra seed, a 29% cut) -> 0.00046 (two, a further 19%).
+# When the two samples agree to within one std they are consistent with ordinary seed noise and
+# the third moves the mean very little -- measured on runs/v11, dropping the third seed shifts
+# the mean by 0.00005, 0.00017 and 0.00018 on its three confirmed nodes, all under a tenth of
+# EPSILON. Disagreement beyond this means the spread is wider than expected and the third seed
+# is worth buying, so the check is on agreement rather than a flat reduction to two seeds.
+#
+# This exists to pay for ensembles rather than to save time as such. A node that ensembles
+# internally is re-run in full for every confirm seed, so confirmation is where the wall-clock
+# actually goes: runs/v9-v11 used 8-21% of the 6h ceiling and 10-16% of the 50-iteration cap,
+# and the convergence rule, not compute, is what ends those runs.
+CONFIRM_EARLY_STOP_SPREAD = SEED_STD
+
+# The unbiased metric's noise is not the validation metric's noise. The random-exposure set is
+# 288,338 rows in which ~63% of users have no positive, so its GAUC rests on far fewer users and
+# spreads wider across seeds. Borrowing SEED_STD (a validation-set figure) as the tolerance
+# rejected every single candidate in runs/v2. Instead the baseline's own seed spread is measured
+# -- it already runs all three seeds -- and the tolerance derived from it. 2.5 sigma is the same
+# convention EPSILON uses.
+UNBIASED_TOLERANCE_SIGMAS = 2.5
+UNBIASED_TOLERANCE_DEFAULT = 0.003   # only if the baseline yields fewer than 2 usable seeds
+
+# Failure diagnosis. "Under-trained" means the model scores worse on the data it was fitted to
+# than the baseline scores on data it has never seen -- an unambiguous sign that optimisation
+# failed rather than that the hypothesis was wrong, and the two call for opposite responses.
+# Anchoring on the baseline's *validation* score rather than a fixed margin below its training
+# score is what keeps this honest: replaying runs/v2, a 0.02 margin also flagged nodes 10 and
+# 15 (train 0.6699 and 0.6631), and node 15 was the best node in the entire run.
+UNDER_TRAINED_MARGIN = 0.0
+# A train-val gap this multiple of the baseline's gap is overfitting rather than a bad idea.
+OVERFIT_GAP_RATIO = 1.5
+
+# Execution sandbox. Raised alongside library access: the numpy FM trains in ~40s, but a CPU
+# torch or GBDT run is a different order of magnitude, and runs/v2 already saw a 559s iteration.
+EXEC_TIMEOUT_S = 1800
+# Only enforced on Linux. macOS refuses to lower RLIMIT_AS from its inherited infinite soft
+# limit, so executor._limit_memory silently no-ops there -- see the note in that function.
+EXEC_MEMORY_CAP_GB = 24
 STDOUT_TAIL_CHARS = 1500
 
 # LLM access through AWS Bedrock.

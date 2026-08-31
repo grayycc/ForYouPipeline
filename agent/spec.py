@@ -30,6 +30,7 @@ class ExperimentSpec:
     tags: List[str] = dataclasses.field(default_factory=list)
     candidates_considered: List[str] = dataclasses.field(default_factory=list)
     reflection: str = ''
+    feature_provenance: Any = None
 
     def to_dict(self) -> Dict[str, Any]:
         return dataclasses.asdict(self)
@@ -122,5 +123,6 @@ def parse_spec(text: str) -> Tuple[Optional[ExperimentSpec], str]:
         tags=as_list(raw.get('tags')),
         candidates_considered=as_list(raw.get('candidates_considered')),
         reflection=as_text(raw.get('reflection')),
+        feature_provenance=raw.get('feature_provenance'),
     )
     return spec, ''
