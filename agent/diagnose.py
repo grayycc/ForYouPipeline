@@ -11,6 +11,7 @@ Both are questions plain arithmetic answers better than a model does, from numbe
 Node. The verdict then goes into the prompt, so the planner reasons from a diagnosis rather than
 from a bare score.
 """
+import json
 import re
 import statistics
 from typing import List, Optional
@@ -388,4 +389,90 @@ def exhausted_block(journal) -> str:
                      f'({", ".join(f"node {i}" for i in ids)}), all worse than their parent.')
     lines.append('')
     lines.append('Spend this iteration on a mechanism that is still open.')
+    return '\n'.join(lines)
+
+
+def cross_run_yield(runs_dir='runs', exclude_run=None, min_attempts=3):
+    """What each mechanism family has actually returned, pooled over every prior run.
+
+    `exhausted_mechanisms` and `ruled_out_block` both read one journal, so everything a run
+    learns dies with it. Measured over v2-v9: gradient-boosted trees is **0 accepted from 15
+    attempts spread across 7 separate runs**, and every one of those runs spent an iteration
+    rediscovering it -- in v9, which converged after 5 iterations, that was 20% of the budget.
+    Meanwhile 73% of all attempts went to families whose median delta is at or below +0.0001,
+    and the one family whose median clears the noise floor (ensembling, +0.00187 median, 44%
+    accepted) was tried 9 times against factorization-machine tweaks' 52.
+
+    That is an allocation problem, not a knowledge problem, and it is fixed by showing the
+    planner the table rather than by forbidding anything. Deliberately reported, never enforced:
+    the task description has changed repeatedly across these runs, so a family that failed under
+    an older prompt has not necessarily been refuted under the current one. Cross-run closure
+    would freeze in conclusions drawn against instructions that no longer exist.
+
+    Nodes the reviewer flagged LEAK are excluded -- runs/v7 node 3 read the label through
+    `play_time_ms` and scored 0.8482, which would otherwise dominate every statistic it touches.
+    """
+    import glob
+    import os
+    import statistics as _st
+
+    by_family = {}
+    for path in sorted(glob.glob(os.path.join(runs_dir, '*', 'log.jsonl'))):
+        run = os.path.basename(os.path.dirname(path))
+        if run.startswith('smoke') or run == exclude_run:
+            continue
+        try:
+            lines = open(path).read().splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            if not d.get('val_primary') or not d.get('tags'):
+                continue
+            if d.get('review_verdict') == 'LEAK':
+                continue
+            for fam in families_of(d['tags']) or ['(other)']:
+                rec = by_family.setdefault(fam, {'deltas': [], 'accepted': 0, 'runs': set()})
+                rec['deltas'].append(d.get('delta_vs_baseline') or 0.0)
+                rec['accepted'] += 1 if d.get('accepted') else 0
+                rec['runs'].add(run)
+
+    out = []
+    for fam, rec in by_family.items():
+        n = len(rec['deltas'])
+        if n < min_attempts:
+            continue
+        out.append({'family': fam, 'n': n, 'accepted': rec['accepted'],
+                    'median': _st.median(rec['deltas']), 'best': max(rec['deltas']),
+                    'runs': len(rec['runs'])})
+    out.sort(key=lambda r: -r['median'])
+    return out
+
+
+def cross_run_block(runs_dir='runs', exclude_run=None) -> str:
+    """Prompt section: the standing record of each mechanism family across all prior runs."""
+    from . import config
+    rows = cross_run_yield(runs_dir, exclude_run)
+    if len(rows) < 2:
+        return ''
+    lines = ['# What each kind of change has actually returned, across every prior run',
+             '',
+             'Pooled over previous runs of this agent on this split, so it carries evidence '
+             'this run has not paid for. Delta is against the official baseline; the noise '
+             f'floor is {config.EPSILON}.',
+             '',
+             '| mechanism | attempts | accepted | median delta | best delta | seen in N runs |',
+             '|---|---|---|---|---|---|']
+    for r in rows:
+        lines.append(f"| {r['family']} | {r['n']} | {r['accepted']} "
+                     f"({100 * r['accepted'] // r['n']}%) | {r['median']:+.5f} | "
+                     f"{r['best']:+.5f} | {r['runs']} |")
+    lines += ['',
+              'This is a record, not a rule. The task description has changed between these '
+              'runs, so a family that did badly under older instructions has not necessarily '
+              'been refuted under the current ones — but a family with many attempts across '
+              'many runs and no accepts is asking you for a reason why this attempt differs.']
     return '\n'.join(lines)

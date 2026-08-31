@@ -109,6 +109,12 @@ def _build_prompt(iteration, journal, extra: str = '') -> str:
         if best.stdout_tail:
             parts.append(f'\nIts output:\n```\n{best.stdout_tail}\n```')
 
+    # Evidence from prior runs, which this run has not paid for and would otherwise re-derive:
+    # gradient-boosted trees is 0-accepted from 15 attempts across 7 separate runs, and every
+    # one of those runs spent an iteration finding that out again.
+    if getattr(journal, 'cross_run_yield', ''):
+        parts.append(f'\n{journal.cross_run_yield}')
+
     # Before the softer "what the evidence has and has not settled" block, because this one is
     # enforced: a spec matching a closed family is rejected by the gates, not merely flagged.
     exhausted = diagnose.exhausted_block(journal)

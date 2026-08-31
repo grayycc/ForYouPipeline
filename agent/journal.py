@@ -103,6 +103,8 @@ class Journal:
         # from the baseline's own seed spread rather than borrowed from the validation metric's
         # std -- see config.UNBIASED_TOLERANCE_SIGMAS. None until the baseline resolves.
         self.unbiased_tolerance: Optional[float] = None
+        # Rendered once by the orchestrator from prior runs' logs; see diagnose.cross_run_block.
+        self.cross_run_yield: str = ''
         # Every paper any search returned this run: id -> {title, outcome of prior use}.
         # Citations are checked against this, so the planner cannot cite a paper that no
         # real search returned.

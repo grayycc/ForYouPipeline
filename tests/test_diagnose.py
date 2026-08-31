@@ -377,3 +377,31 @@ def test_tree_family_matches_however_the_planner_spells_it():
     # and the families it must not swallow
     for tag in ('fm', 'listnet', 'ensemble', 'user-history'):
         assert 'gradient-boosted trees' not in diagnose.families_of([tag]), tag
+
+
+def test_cross_run_yield_pools_families_over_prior_runs():
+    """Every run re-learned that gradient-boosted trees do not work here: 0 accepted from 15
+    attempts across 7 separate runs, because exhausted_mechanisms only ever sees one journal."""
+    rows = {r['family']: r for r in diagnose.cross_run_yield('runs')}
+    gbdt = rows.get('gradient-boosted trees')
+    assert gbdt is not None
+    assert gbdt['accepted'] == 0, gbdt
+    assert gbdt['runs'] >= 5, gbdt
+    assert gbdt['median'] < 0, gbdt
+
+    ens = rows.get('ensembling')
+    assert ens is not None and ens['accepted'] > 0
+    assert ens['median'] > gbdt['median']
+
+
+def test_cross_run_yield_excludes_the_leaked_node():
+    """runs/v7 node 3 read the label through play_time_ms and scored 0.8482 -- a +0.247 delta
+    that would dominate whatever family it lands in."""
+    for r in diagnose.cross_run_yield('runs'):
+        assert r['best'] < 0.1, (r['family'], r['best'])
+
+
+def test_cross_run_yield_can_exclude_the_current_run():
+    with_v9 = {r['family']: r['n'] for r in diagnose.cross_run_yield('runs')}
+    without = {r['family']: r['n'] for r in diagnose.cross_run_yield('runs', exclude_run='v9')}
+    assert sum(without.values()) < sum(with_v9.values())

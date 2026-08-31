@@ -38,6 +38,15 @@ class Agent:
         self.converged_at = None
         self.refit_status = 'not attempted'
 
+        # Read once, not per iteration: the prior runs' logs do not change while this one runs,
+        # and re-parsing every log on every planner call would grow with the number of runs on
+        # disk. Stored on the journal so the prompt builders can reach it the way they reach
+        # everything else.
+        self.journal.cross_run_yield = diagnose.cross_run_block(
+            config.RUNS_DIR, exclude_run=run_id)
+        if self.journal.cross_run_yield:
+            print('  [history] mechanism yield from prior runs loaded into the planner prompt')
+
     def write_dummy_submissions(self):
         """Always keep a valid submission on disk, from before the first iteration."""
         from data import load
