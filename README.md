@@ -12,8 +12,8 @@ convergence rule says to stop.
 |  | GAUC | nDCG@5 | primary |
 |---|---|---|---|
 | Official baseline (hidden test) | 0.6610 | 0.5282 | 0.5946 |
-| **Our submission (hidden test)** | **0.6625** | **0.5301** | **0.5963** |
-| Δ over baseline | +0.0015 | +0.0019 | **+0.0017** |
+| **Our submission (hidden test)** | **0.6643** | **0.5306** | **0.5975** |
+| Δ over baseline | +0.0033 | +0.0024 | **+0.0029** |
 
 | | GAUC | nDCG@5 | primary |
 |---|---|---|---|
@@ -27,9 +27,22 @@ never seen during the run. Both tables are measured, not projected — see
 in [Results in detail](#results-in-detail) below.
 
 Scored per the challenge formula — `delta(m) = score_agent(m) − score_baseline(m)`, then the
-equal-weighted mean over both metrics — that is **+0.0017 on hidden test** (mean of +0.0015 GAUC
-and +0.0019 nDCG@5) and **+0.0026 on validation**. Because `primary` is itself the mean of the
+equal-weighted mean over both metrics — that is **+0.0029 on hidden test** (mean of +0.0033 GAUC
+and +0.0024 nDCG@5) and **+0.0026 on validation**. Because `primary` is itself the mean of the
 two metrics, the primary-row delta and the formula give the same number.
+
+The hidden-test row is the submitted file, `runs/v10/best_submission_test.csv`. It scores
+slightly higher than node 6's own test output (0.5975 vs. 0.5963) because after converging, the
+agent refits the winning configuration on train **+** validation and regenerates only the test
+submission — the test window directly follows validation, so that buys it a week of more recent
+data. Validation is still scored by the train-only model, since validation is inside the refit's
+training set and scoring it there would be meaningless.
+
+**The agent never sees the hidden test set.** Verified in the submitted solution: `evaluate()`
+is called only on train and valid, and the test split's label array is unpacked but used
+exclusively for `len()` when sizing a scores buffer — never as a target, never for model
+selection. Test rows are used only to build features from their own known-at-serving-time
+columns and to write the submission.
 
 ## How it works
 
@@ -82,15 +95,27 @@ needed to run the agent itself** — re-scoring an existing submission needs not
 
 ```bash
 export PYTHONPATH="$PWD/kit"   # the solution imports data/baseline/evaluate/submit from kit/
+
+# 1. Train on `train` only -> the validation-best checkpoint and its valid submission
 python3 runs/v10/best_solution.py \
   --data_dir KuaiRand-Pure/data --out_dir /tmp/repro --seed 0
 python3 kit/submit.py --score --split valid --data_dir KuaiRand-Pure/data /tmp/repro/submission_valid.csv
+
+# 2. Refit the same configuration on train+valid -> the submitted test file
+python3 runs/v10/best_solution.py --train_split train+valid \
+  --data_dir KuaiRand-Pure/data --out_dir /tmp/repro_refit --seed 0
+python3 kit/submit.py --check --split test --data_dir KuaiRand-Pure/data /tmp/repro_refit/submission_test.csv
 ```
+
+Step 1 reproduces the validation numbers; step 2 reproduces
+`runs/v10/best_submission_test.csv`, the file that is actually submitted. Step 2 deliberately
+writes no validation submission and prints no metrics — validation is inside its training set
+at that point, so any score it reported would be meaningless.
 
 This is the code that produced the numbers above. It was re-verified this session from a clean
 `git worktree` checkout with no uncommitted files present, at three independent ensemble-seed
-offsets (0.6042 / 0.6044 / 0.6043 — reproduces to ±0.0002), and scored directly against the
-hidden-test labels.
+offsets (0.6042 / 0.6044 / 0.6043 — reproduces to ±0.0002), and both submission files were
+scored directly against the hidden-test labels.
 
 **The search that found it** — genuinely stochastic, not guaranteed to rediscover this exact
 result:
