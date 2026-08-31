@@ -191,6 +191,14 @@ itself failed — is in [`runs/v10/ITERATION_LOG.md`](runs/v10/ITERATION_LOG.md)
   independent pass before treating any single run's `CLEAN` verdict as certainty on a security-
   or leakage-sensitive line.
 
+## Team contributions
+
+Charlene, Grace, Shanyce, Beatriss, Priscilla.
+
+The work was collaborative rather than split into owned components: each of us ran our own
+exploration and research into the problem, and the design of the agent and its evaluation
+harness came out of comparing those findings.
+
 ## Data
 
 Download from [kuairand.com](https://kuairand.com) (direct Zenodo link, no registration needed):
