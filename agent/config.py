@@ -56,20 +56,32 @@ WALL_CLOCK_CEILING_S = 6 * 3600   # backstop
 EPSILON = 0.002
 CONVERGENCE_N = 3
 
-# Convergence is a stopping rule for a search that has actually run, not a warm-up filter.
-# Four scoring nodes exist by iteration ~4 (baseline plus three experiments), so with no floor
-# the epsilon/N rule fires the moment three experiments in a row fail to beat a strong
-# baseline -- which is the normal early state of any search, not evidence of a plateau.
-# Measured: every prior run stopped at iteration 4 of 50. The rule below still decides when
-# the run ends; this only stops it deciding before there is a search to stop.
+# No floor: the challenge's convergence rule is applied literally, exactly as written --
+# converged when the validation best has not improved by more than EPSILON over the last
+# CONVERGENCE_N scoring iterations, whichever of that, the 50-iteration cap and the 6h ceiling
+# comes first.
 #
-# Raised from 15 after runs/v5 stopped at iteration 18 having spent 1.0h of a 6h ceiling and
-# 19 of 50 iterations, shipping +0.0003. Stopping early is only cheap if the result is good:
-# resource consumption is scored in three coarse tiers AND only among entries that beat the
-# baseline, so converging at the noise floor forfeits the primary metric to save something that
-# was not close to a tier boundary. 30 still leaves the cap and the wall-clock ceiling as the
-# real limits, and the epsilon/N rule ends the run whenever it fires after that.
-MIN_ITERATIONS_BEFORE_CONVERGENCE = 30
+# This was 30, and removing it is a deliberate choice to be rule-exact rather than to maximise
+# the score. Be clear about what it costs, because it is measured, not predicted. Replaying the
+# literal rule over every completed run:
+#
+#     v2  stops at node 6  ->  delta +0.00000   (actually shipped +0.00070)
+#     v3  stops at node 4  ->  delta +0.00000   (actually shipped +0.00160)
+#     v4  stops at node 5  ->  delta +0.00000   (actually shipped +0.00000)
+#     v5  stops at node 4  ->  delta +0.00000   (actually shipped +0.00040)
+#     v6  stops at node 4  ->  delta +0.00000   (actually shipped +0.00253)
+#
+# Every run stops before the search has produced anything, shipping the agent's own baseline
+# reproduction. The cause is not the floor and not the implementation: the rule fires whenever
+# the agent is not making jumps larger than EPSILON, and the largest single-step gain in any run
+# so far is +0.00087, roughly a quarter of the threshold. Iterations 2-4 are the mandatory
+# drafts, which start from a blank file and are reliably worse than the incumbent, so the window
+# is flat exactly when the rule first becomes checkable.
+#
+# The only real fix is a change worth more than EPSILON on its own; nothing about the stopping
+# rule can substitute for one. Setting this back to 30 restores the previous behaviour, and that
+# is a disclosed deviation that belongs in the README if it is used.
+MIN_ITERATIONS_BEFORE_CONVERGENCE = 0
 
 # Reference scores to measure against.
 BASELINE_VALID_PRIMARY = 0.6016
