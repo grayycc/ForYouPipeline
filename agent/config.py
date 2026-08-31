@@ -90,7 +90,20 @@ ORACLE_PRIMARY = 0.8645
 SEED_STD = 0.0008
 
 # Search policy.
-MIN_DRAFTS = 3                    # distinct fresh solutions before improve-only
+# No mandatory opening drafts. Measured across every run ever done: 1 of 26 drafts was ever
+# accepted (4%), and that one was in a throwaway smoke run -- the five real runs are 0-for-22.
+# They are also the worst nodes produced (0.4439 and 0.5242 against a 0.6015 baseline in v3) and
+# the source of the only label leak that ever reached a score (v7 node 3, play_time_ms, 0.8482).
+#
+# Worse, as an *opening* move they are actively harmful now that the convergence rule is
+# literal. A draft starts from a blank file, so it reliably scores below the incumbent, which
+# flattens the best-so-far window at exactly the iteration the epsilon/N rule first becomes
+# checkable. Replaying the rule with drafts removed moves v3 from +0.00000 to +0.00140 and v6
+# from +0.00000 to +0.00023.
+#
+# Drafts are not disabled -- STALL_NOISE_STREAK still forces one when the search plateaus, which
+# is the situation they are actually good for, and MAX_DRAFTS still caps them.
+MIN_DRAFTS = 0                    # distinct fresh solutions before improve-only
 
 # Escaping a plateau. `improve` only ever mutates the incumbent, so once the drafts are spent
 # the search has no way to make a large jump -- runs/v3 burnt its three drafts at iterations

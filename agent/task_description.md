@@ -95,8 +95,27 @@ is noise, not a result. Do not build on top of a change you have not separated f
 
 | file | notes |
 |---|---|
-| `log_standard_4_08_to_4_21_pure.csv` | train window; 19 columns |
+| `log_standard_4_08_to_4_21_pure.csv` | train window; 19 columns, **11 of them post-interaction — see below** |
 | `log_standard_4_22_to_5_08_pure.csv` | valid+test window |
+
+**Eleven of those 19 columns describe what happened *during* the impression, and none of them
+may be used as a feature for that row.** They are:
+
+`play_time_ms`, `is_click`, `is_like`, `is_follow`, `is_comment`, `is_forward`, `is_hate`,
+`profile_stay_time`, `comment_stay_time`, `is_profile_enter`, and `long_view` itself.
+
+At serving time you are ranking a video the user has *not yet watched*, so none of these exist.
+`play_time_ms` is the label in disguise: `long_view` is derived from it, and the single rule
+`play_time_ms >= duration_ms` reproduces the label on **79.9%** of training rows by itself. A
+run that used `play_time_ms / duration_ms` as a feature scored validation primary **0.8482**
+against an oracle ceiling of 0.8484 and a GAUC of **0.9998** — it was reading the answer, and
+that submission would have collapsed on the hidden test set. Any feature derived from these
+columns for the row being scored is leakage, including ratios, differences and clipped versions
+of them.
+
+They are legitimate in exactly one direction: aggregated over a user's or a video's **strictly
+past** rows to describe *history*, never the current row. `duration_ms`, `tab`, `date`,
+`hourmin` and the IDs are known before the impression and are safe.
 | `log_random_4_22_to_5_08_pure.csv` | **1,186,059 rows of randomly-exposed impressions** over the valid+test window. Videos here were shown at random rather than chosen by the production recommender, so metrics computed on it are not biased by the logging policy. |
 
 **Do not hand-roll the random-exposure scoring — import it.** `kit/unbiased.py` does the
@@ -204,6 +223,18 @@ These were measured by the organisers and by prior runs. Treat them as known.
   anything slightly worse.
 - Embedding dim k = 8 / 16 / 32: **0.5895 / 0.5902 / 0.5887** — flat. Model capacity is
   *proven* not to be the bottleneck; 1.14M rows will not support a much bigger model.
+- **What prior runs found that *did* work, with the measured size.** These are results from
+  earlier runs of this same agent on this same split, recorded so a run does not have to spend
+  its budget rediscovering them. They are measurements, not instructions — you decide whether
+  to build on them, combine them, or go elsewhere.
+  - **Seed ensembling with within-user rank averaging: +0.0016.** Train 5 copies of the model on
+    seeds 0-4, convert each model's scores to within-user fractional ranks, then average the
+    ranks rather than the raw scores. Averaging raw scores gave about half as much; the
+    rank-space step is where most of it came from, because the metric only reads ordering.
+  - **Bayesian-smoothed per-video and per-author long-view rate, bucketed: +0.0008.** Computed
+    from training rows only and smoothed toward the global rate so rare IDs are not trusted.
+  - Those two together account for +0.0024 of a best-ever +0.0025, and they compose: the
+    ensembling result was measured on top of the smoothed-CTR model, not instead of it.
 - **A feature that is constant within a user contributes exactly zero.** Only the ordering
   inside each user's list is scored, so any term identical across all of one user's rows
   cancels out entirely. This was measured: item-popularity alone and item-popularity crossed
