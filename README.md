@@ -26,6 +26,11 @@ never seen during the run. Both tables are measured, not projected — see
 [Reproducing the result](#reproducing-the-result). Full resource-usage and iteration numbers are
 in [Results in detail](#results-in-detail) below.
 
+Scored per the challenge formula — `delta(m) = score_agent(m) − score_baseline(m)`, then the
+equal-weighted mean over both metrics — that is **+0.0017 on hidden test** (mean of +0.0015 GAUC
+and +0.0019 nDCG@5) and **+0.0026 on validation**. Because `primary` is itself the mean of the
+two metrics, the primary-row delta and the formula give the same number.
+
 ## How it works
 
 `run_agent.py` drives `agent/orchestrator.py` through an AIDE-style greedy tree search:

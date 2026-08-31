@@ -25,10 +25,18 @@ import sys
 
 
 def node_dir(run_dir, node_id):
+    """Where a single node's artifacts (solution.py, stdout.txt, submissions) live."""
     return os.path.join(run_dir, 'nodes', f'node_{node_id}')
 
 
 def read_code(run_dir, node_id):
+    """A node's generated solution, or None if it has no file.
+
+    None is a real, expected state, not an error: a node whose LLM call failed never got as far
+    as producing code, and a node that crashed during planning has no solution either. Callers
+    must distinguish "no file" from "empty diff" -- reporting the second when the first is true
+    would invent a diff that never existed.
+    """
     path = os.path.join(node_dir(run_dir, node_id), 'solution.py')
     if not os.path.exists(path):
         return None
@@ -37,10 +45,49 @@ def read_code(run_dir, node_id):
 
 
 def fmt_metric(v, digits=4):
+    """Fixed-width metric, or an em dash when the node produced no such number."""
     return f'{v:.{digits}f}' if isinstance(v, (int, float)) else '—'
 
 
+def render_summary(run_dir):
+    """The run-level header: outcome plus the resource figures the deliverable asks for.
+
+    Deliverable 3 wants "a short summary reporting the number of manual interventions during
+    the run" as part of the run log itself, so it belongs here rather than only in the README --
+    this file is the artifact that gets read as the iteration log.
+    """
+    path = os.path.join(run_dir, 'summary.json')
+    if not os.path.exists(path):
+        return ''
+    with open(path) as fh:
+        s = json.load(fh)
+
+    wall = s.get('agent_wall_clock_seconds') or 0
+    rows = [
+        ('Best validation primary', f"{fmt_metric(s.get('best_valid_primary'))} "
+                                    f"(GAUC {fmt_metric(s.get('best_valid_gauc'))} / "
+                                    f"nDCG@5 {fmt_metric(s.get('best_valid_ndcg5'))}), node "
+                                    f"{s.get('best_node_id')}"),
+        ('Delta vs. official baseline', f"{s.get('delta_vs_baseline'):+.4f}"
+                                        if isinstance(s.get('delta_vs_baseline'), float) else '—'),
+        ('Iterations used', f"{s.get('iterations_used')} of {s.get('iteration_cap')} cap"),
+        ('Converged at iteration', str(s.get('converged_at_iteration'))),
+        ('Total tokens (in + out)', f"{s.get('total_tokens', 0):,} "
+                                    f"({s.get('total_tokens_in', 0):,} in / "
+                                    f"{s.get('total_tokens_out', 0):,} out)"),
+        ('Agent wall-clock', f"{wall:,.0f}s ({wall / 3600:.2f}h)"),
+        ('GPU-hours', str(s.get('gpu_hours', 0))),
+        ('**Manual interventions**', f"**{s.get('manual_interventions')}**"),
+        ('Nodes that failed to run', f"{s.get('buggy_nodes')} (each recovered from "
+                                     f"automatically -- see the per-node entries below)"),
+    ]
+    out = ['## Run summary', '', '| | |', '|---|---|']
+    out += [f'| {k} | {v} |' for k, v in rows]
+    return '\n'.join(out) + '\n'
+
+
 def render_node(d, run_dir):
+    """One markdown section for a single node: hypothesis, outcome, and the real diff."""
     lines = [f"## Node {d['iter']} — `{d['operation']}`"
              + (f" (parent: node {d['parent_id']})" if d.get('parent_id') is not None else '')]
 
@@ -94,7 +141,8 @@ def render_node(d, run_dir):
 
 
 def main():
-    ap = argparse.ArgumentParser()
+    """Render one run's log to stdout as markdown."""
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('run_id')
     ap.add_argument('--runs_dir', default='runs')
     args = ap.parse_args()
@@ -109,6 +157,9 @@ def main():
     print(f'# Iteration log — run `{args.run_id}`\n')
     print(f'{len(nodes)} nodes. Each code diff below is computed from the actual files this '
          f'run wrote, against the actual parent it branched from -- not a description.\n')
+    summary = render_summary(run_dir)
+    if summary:
+        print(summary)
     for d in nodes:
         print(render_node(d, run_dir))
         print()

@@ -2,6 +2,20 @@
 
 8 nodes. Each code diff below is computed from the actual files this run wrote, against the actual parent it branched from -- not a description.
 
+## Run summary
+
+| | |
+|---|---|
+| Best validation primary | 0.6042 (GAUC 0.6711 / nDCG@5 0.5373), node 6 |
+| Delta vs. official baseline | +0.0026 |
+| Iterations used | 8 of 50 cap |
+| Converged at iteration | 7 |
+| Total tokens (in + out) | 217,595 (142,136 in / 75,459 out) |
+| Agent wall-clock | 4,549s (1.26h) |
+| GPU-hours | 0.0 |
+| **Manual interventions** | **0** |
+| Nodes that failed to run | 2 (each recovered from automatically -- see the per-node entries below) |
+
 ## Node 0 — `baseline`
 
 **Hypothesis:**
