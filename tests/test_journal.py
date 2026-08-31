@@ -99,3 +99,19 @@ def test_floor_still_allows_convergence_once_met():
     nodes += [scoring(i, 0.6015) for i in range(1, 16)]
     j = build(nodes)
     assert j.has_converged(EPS, N, min_scoring_nodes=15), 'floor cleared, rule applies'
+
+
+def test_a_node_records_when_the_solution_ignored_the_seed():
+    """runs/v10 spent 51% of its wall clock re-running scripts whose ensembles hardcoded
+    `for s in range(N_SEEDS)`, so every confirm seed returned a bit-identical score and the
+    seed-averaging it paid for could not have detected a lucky draw."""
+    from agent.journal import Node
+    n = Node(id=1, parent_id=0, operation='improve')
+    assert n.ignores_seed is False
+    n.seed_scores = [0.6028, 0.6028]
+    n.ignores_seed = n.seed_scores[1] == n.seed_scores[0]
+    assert n.ignores_seed is True
+
+    m = Node(id=2, parent_id=0, operation='improve')
+    m.seed_scores = [0.6015, 0.6018]
+    assert (m.seed_scores[1] == m.seed_scores[0]) is False

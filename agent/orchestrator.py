@@ -388,6 +388,19 @@ class Agent:
                 print(f'    seed {s}: failed ({r["buggy_reason"]}) -- excluded')
                 continue
             node.seed_scores.append(p)
+            # A bit-identical score from a different seed means the solution ignored --seed,
+            # so every remaining seed will return the same number too. Two independent FM runs
+            # cannot agree to the last float otherwise. runs/v10 spent 2229s of its 4385s --
+            # 51% of the run -- re-deriving numbers it already had, because its ensembles used
+            # `for s in range(N_SEEDS)` rather than seeding from args.seed. The averaging is
+            # also vacuous in that state: it exists to stop a lucky seed being mistaken for a
+            # gain, and it cannot see one it never varied.
+            if len(node.seed_scores) == 2 and node.seed_scores[1] == node.seed_scores[0]:
+                node.ignores_seed = True
+                print(f'    seed {s}: identical to seed {config.CONFIRM_SEEDS[0]} to the last '
+                      f'float -- the solution ignores --seed, so the remaining seeds would '
+                      f'repeat it. Skipping them; this score is NOT seed-confirmed.')
+                break
             # The unbiased score is averaged over the same seeds. Leaving it at the seed-0 value
             # while averaging validation compares a noisy number against a smoothed one, and the
             # gate then rejects on noise -- which is what happened to every candidate in v2.
@@ -515,6 +528,7 @@ class Agent:
             'diagnosis': diagnose.classify(node, self.journal),
             'seeds_averaged': node.seeds_averaged, 'seed_scores': node.seed_scores,
             'seed_unbiased_scores': node.seed_unbiased_scores,
+            'ignores_seed': node.ignores_seed,
             'accepted': node.accepted,
             'is_buggy': node.is_buggy, 'buggy_reason': node.buggy_reason,
             'exception_type': node.exception_type, 'recovery_action': node.recovery_action,

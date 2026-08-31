@@ -89,6 +89,12 @@ def draft_prompt(iteration, journal):
     # in two of them), reinventing the target-encoding overfit the EDA pass had already
     # characterised.
     context = ''
+    # Drafts were the one path that never saw the cross-run record, and it showed: runs/v10's
+    # only draft opened with gradient-boosted trees, a family that is 0-accepted from 15
+    # attempts across 7 runs. A draft picks a mechanism from a blank file, so it needs the
+    # standing evidence at least as much as an improve does.
+    if getattr(journal, 'cross_run_yield', ''):
+        context += f'\n{journal.cross_run_yield}\n'
     if journal.eda_findings:
         context += f'\n# Measured properties of this data\n\n{journal.eda_findings}\n'
     ruled_out = diagnose.ruled_out_block(journal)

@@ -74,6 +74,9 @@ class Node:
     stderr_tail: str = ''
     exec_time: float = 0.0
     submission_ok: bool = False
+    # Set when two confirm seeds returned a bit-identical score, which means the solution never
+    # read --seed. The averaged score is then a single sample wearing three hats.
+    ignores_seed: bool = False
 
     # loop bookkeeping
     accepted: bool = False

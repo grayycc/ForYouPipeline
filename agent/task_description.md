@@ -350,6 +350,18 @@ Write **one standalone Python file** that:
    repeating up to 12 times.
 5. Respects `--seed` for every source of randomness, so the same seed reproduces the same
    score and different seeds give an honest spread.
+
+   **This includes the seeds inside an ensemble, and getting it wrong is silent.** A promising
+   node is re-run on two further values of `--seed` and the scores averaged, precisely so a
+   lucky draw cannot be mistaken for a gain. A script that hardcodes its ensemble as
+   `for s in range(N_SEEDS)` returns the identical number all three times: the averaging
+   becomes one sample wearing three hats, and the two extra runs are pure cost. Measured on one
+   run, that was 2,229 seconds of 4,385 — 51% of the whole run — spent recomputing a number it
+   already had. Derive them instead:
+
+   ```python
+   ENSEMBLE_SEEDS = [args.seed + i for i in range(N_SEEDS)]
+   ```
 6. Imports only from the standard library and the packages listed below. Keep runtime under
    25 minutes.
 
