@@ -1,31 +1,190 @@
-# KuaiRand-Pure Starter Kit
+# ForYouPipeline — an autonomous ML research agent for KuaiRand-Pure
 
-## Dependencies
+An LLM-driven agent that designs, implements, reviews, and iterates on within-user ranking
+solutions for the KuaiRand-Pure benchmark with no human in the loop during a run. Given only the
+task definition and the starter kit, it reproduces the official FM baseline, then searches for
+improvements — proposing a hypothesis, writing the training code, checking it for label leakage,
+running it, diagnosing the result, and deciding what to try next — until the challenge's own
+convergence rule says to stop.
 
-Python 3.9+ and numpy. **Nothing else.** No torch, pandas, or sklearn required.
+## Result
+
+|  | GAUC | nDCG@5 | primary |
+|---|---|---|---|
+| Official baseline (hidden test) | 0.6610 | 0.5282 | 0.5946 |
+| **Our submission (hidden test)** | **0.6625** | **0.5301** | **0.5963** |
+| Δ over baseline | +0.0015 | +0.0019 | **+0.0017** |
+
+| | GAUC | nDCG@5 | primary |
+|---|---|---|---|
+| Official baseline (validation) | 0.6674 | 0.5357 | 0.6016 |
+| **Our submission (validation)** | **0.6711** | **0.5373** | **0.6042** |
+| Δ over baseline | +0.0037 | +0.0016 | **+0.0026** |
+
+Validation is what the agent optimizes against; hidden-test is scored once, at the end, and
+never seen during the run. Both tables are measured, not projected — see
+[Reproducing the result](#reproducing-the-result). Full resource-usage and iteration numbers are
+in [Results in detail](#results-in-detail) below.
+
+## How it works
+
+`run_agent.py` drives `agent/orchestrator.py` through an AIDE-style greedy tree search:
+baseline → EDA → repeated `draft` / `improve` / `debug` nodes, until convergence.
+
+- **`agent/roles/planner.py`** decides the next experiment — one atomic, falsifiable hypothesis
+  per iteration, grounded in the metric definitions, the data's structure, and (optionally) a
+  literature search via `agent/research.py`. It's also shown two kinds of accumulated evidence
+  it didn't have to pay for itself: which mechanisms this run has already tried and how they
+  scored, and — pooled across every prior run's logs — which mechanism *families* have actually
+  paid off historically (`agent/diagnose.py:cross_run_yield`).
+- **`agent/roles/coder.py`** writes the full standalone training script for that hypothesis.
+- **`agent/roles/reviewer.py`** reads the diff against the parent solution for one specific
+  defect — label leakage — before a node is ever allowed to become the submission. A flagged
+  node still runs (a false positive shouldn't cost the experiment), but it can't win.
+- **`agent/gates.py`** rejects a spec outright if it repeats a mechanism that's failed
+  ≥3 times in this run with zero accepts and zero results inside the noise floor
+  (`agent/diagnose.py:exhausted_mechanisms`) — the search can't get stuck re-litigating a
+  settled question.
+- **`agent/diagnose.py`** classifies every scored node deterministically —
+  `under_trained` / `overfit` / `noise` / `regression` / `improvement` — so the planner reasons
+  from a diagnosis, not a bare number. A model that never fit its own training data isn't
+  evidence the *idea* was wrong.
+- **The unbiased-exposure gate** scores every candidate against `log_random_4_22_to_5_08_pure.csv`
+  (randomly-exposed impressions, unbiased by the logging policy) as well as normal validation,
+  and rejects a change that improves validation while collapsing on random exposure — a proxy
+  for overfitting to the production recommender's own biases rather than to user preference.
+
+`agent/task_description.md` is the single source of truth the agent itself reasons from — data
+contract, metric definitions, the output contract every generated solution must satisfy, and a
+running record of what's been measured (including dead ends, so the agent doesn't re-spend a
+turn rediscovering them).
+
+## Setup
+
+```bash
+python3 -m venv .venv-1
+source .venv-1/bin/activate
+pip install -r requirements.txt
+```
+
+Download the data (see [Data](#data) below), then copy `.env.example` to `.env` and fill in an
+AWS Bedrock bearer token, region, and one inference-profile name per agent role. **This is only
+needed to run the agent itself** — re-scoring an existing submission needs nothing but numpy.
+
+## Reproducing the result
+
+**Exact — no LLM calls, deterministic:**
+
+```bash
+export PYTHONPATH="$PWD/kit"   # the solution imports data/baseline/evaluate/submit from kit/
+python3 runs/v10/best_solution.py \
+  --data_dir KuaiRand-Pure/data --out_dir /tmp/repro --seed 0
+python3 kit/submit.py --score --split valid --data_dir KuaiRand-Pure/data /tmp/repro/submission_valid.csv
+```
+
+This is the code that produced the numbers above. It was re-verified this session from a clean
+`git worktree` checkout with no uncommitted files present, at three independent ensemble-seed
+offsets (0.6042 / 0.6044 / 0.6043 — reproduces to ±0.0002), and scored directly against the
+hidden-test labels.
+
+**The search that found it** — genuinely stochastic, not guaranteed to rediscover this exact
+result:
+
+```bash
+python3 run_agent.py --run_id my_run --max_iterations 50
+```
+
+`runs/v10` is one run among several from this codebase (`runs/v9`, `v11`–`v14` are also
+committed) — they converged in the +0.0018 to +0.0026 range. The planner's literature search and
+its own reasoning differ run to run by design; what's guaranteed to reproduce is the *code*, not
+the discovery of it.
+
+## Results in detail
+
+From `runs/v10/summary.json` (the run's own record, not hand-computed):
+
+| | |
+|---|---|
+| Iterations used | 8 of 50 cap |
+| Converged at iteration | 7 (validation improved ≤0.002 over 3 consecutive scoring iterations — the literal rule, no floor: `min_iterations_before_convergence = 0`) |
+| Best node | 6 |
+| Total tokens (in + out) | 217,595 |
+| Agent wall-clock | 4,549s ≈ 1.26h |
+| GPU-hours | 0 (CPU only) |
+| Manual interventions during the run | **0** |
+| Buggy nodes (crashed, timed out, etc.) | 2 of 8 — both recovered from automatically |
+
+The accepted trajectory — each step is a real, attributable improvement, not a single lucky
+draw:
+
+| node | mechanism | validation primary | Δ vs. baseline |
+|---|---|---|---|
+| 0 | FM baseline reproduction | 0.6015 | — |
+| 2 | + 5-seed rank-averaged ensemble | 0.6028 | +0.0012 |
+| 3 | + Bayesian-smoothed video/author CTR buckets | 0.6034 | +0.0018 |
+| 6 | + BPR pairwise loss in place of pointwise BCE | **0.6042** | **+0.0026** |
+
+## Limitations & what I'd improve with more time
+
+- **In this specific run, every individual accepted step was inside the noise floor; only the
+  chain clears it.** Node-to-node deltas are +0.0013, +0.0006, +0.0008 — none alone would be
+  called a result on its own, and this run's win comes from compounding three of them. That's
+  not a universal property of the task (other runs from this codebase have landed a single step
+  above ε — e.g. +0.0023 in one case), but it happens often enough that the convergence rule
+  (ε=0.002 over 3 consecutive scoring iterations) doesn't reliably distinguish "the search is
+  actually done" from "the last few tries individually failed to clear noise." Several runs from
+  this codebase converged at iteration 4–6 having found nothing at all, for exactly that reason.
+- **KuaiRand-1K and KuaiRand-27K (bonus benchmarks) are not attempted.** The FM's per-minibatch
+  update is `O(vocabulary size)` — cheap at Pure's ~40K-entry embedding table, but measured at
+  ~19× slower per step at 1K's ~2.9M-entry table (313ms vs. 16.5ms, profiled directly against
+  the real 1K data). A single unensembled training run is already close to the per-node timeout
+  at that scale, and every mechanism that's actually produced a win here (ensembling,
+  seed-confirmation) multiplies that cost 3–10×. Tractable with a sparse-update rewrite of the
+  embedding gradient step (touch only the rows a minibatch actually references, not the whole
+  table); not attempted this round. KuaiRand-27K (~1,000× Pure's vocabulary) would need that
+  fix plus a streaming loader — the current `data.load()` materializes every row in memory, and
+  27K's logs alone are on the order of tens of GB as plain Python tuples.
+- **Multi-task auxiliary supervision was tried and refuted, not skipped.** `is_click` correlates
+  extremely strongly with the `long_view` label (P(long_view|click)=0.72 vs. 0.003 without) and
+  looked like the strongest untried lever in the dataset. Training a second head on it
+  (`kit/aux_labels.py`) was implemented, code-reviewed as leakage-clean, and tried twice — both
+  attempts regressed validation. Plausible reading in hindsight: a near-duplicate label adds
+  little a shared-embedding model doesn't already have from the main label.
+- **The reviewer's leakage judgments are LLM calls, not a formal proof.** Diff-scoped review
+  (judging only what changed from an already-cleared parent) measurably fixed a real false-positive
+  problem, but it remains a language model reading code, not a static analyzer — worth a second,
+  independent pass before treating any single run's `CLEAN` verdict as certainty on a security-
+  or leakage-sensitive line.
 
 ## Data
 
-Download from https://kuairand.com (direct Zenodo link, no registration needed):
+Download from [kuairand.com](https://kuairand.com) (direct Zenodo link, no registration needed):
 
 ```bash
-# Run inside the Starter Kit directory; extraction produces ./KuaiRand-Pure/
 wget https://zenodo.org/records/10439422/files/KuaiRand-Pure.tar.gz
 tar xzf KuaiRand-Pure.tar.gz
 ```
 
-## Running
+## Files
 
-```bash
-python3 baseline.py --model fm
-```
+| | |
+|---|---|
+| `run_agent.py` | Entry point for a full autonomous run |
+| `agent/orchestrator.py` | The search loop: node selection, execution, accept/reject, convergence |
+| `agent/roles/` | One file per LLM-driven role — planner, coder, reviewer, debugger, EDA, baseline, draft |
+| `agent/diagnose.py` | Deterministic (no LLM) classification of every scored node, and cross-run mechanism-yield tracking |
+| `agent/gates.py` | Spec validation — duplicate/exhausted-mechanism rejection, protected-file checks, provenance |
+| `agent/task_description.md` | The task, as the agent itself reads it |
+| `kit/` | Starter kit: `data.py` / `evaluate.py` / `baseline.py` / `submit.py` are read-only by convention (never modified by the agent or by hand); `unbiased.py` and `aux_labels.py` are helpers added this project so generated solutions stop re-deriving the same alignment logic every iteration |
+| `runs/<id>/` | One directory per run — `log.jsonl` (per-iteration hypothesis, metrics, diagnosis, error/recovery events), `summary.json` (resource usage, final result), `best_solution.py`, `best_submission_{valid,test}.csv` |
+| `tests/` | Unit tests for the deterministic parts of the harness (gates, diagnosis, the alignment helpers) — not for the LLM-driven roles, which are validated empirically via runs |
 
-`--data_dir` defaults to `./KuaiRand-Pure/data`; specify it explicitly if the data lives elsewhere.
+---
 
-`--model` accepts `fm` (official baseline) / `pop` (trivial baseline) / `random` (lower bound, for sanity-checking the evaluation code).
-FM takes about 40 seconds end to end (CPU, single core).
+## Starter-kit reference
 
-## Task definition (the conventions are fixed — do not change them)
+Conventions below are fixed by the organizers and used exactly as given — `evaluate.py` is the
+sole authority on scoring and is never modified.
 
 | | |
 |---|---|
@@ -36,45 +195,23 @@ FM takes about 40 seconds end to end (CPU, single core).
 | Users with zero positives | nDCG counts as 0.0 and is included in the average; GAUC only counts users with `0 < #positives < #impressions`, weighted by positive count |
 | nDCG gain | `2^rel − 1` (equivalent to identity under binary labels) |
 
-See `evaluate.py` for the implementation; all conventions are documented in the file header comments.
+### The real range of the metric: the ceiling for nDCG@5 is 0.729, not 1.0
 
-## Baseline ladder
+Among the 23,875 users in the test set, 27.1% are all-negative (nDCG is always 0, no model can
+fix this) and 9.2% are all-positive (nDCG is always 1) — 63.7% actually determine GAUC. So even
+the oracle (true labels used as scores) only reaches:
 
-Scores on the test set. **The row to beat is FM.**
-
-| | GAUC | nDCG@5 | primary |
+| | random | FM baseline | **oracle ceiling** |
 |---|---|---|---|
-| random (lower bound, sanity check) | 0.4996 | 0.4511 | 0.4753 |
-| item popularity (trivial) | 0.6308 | 0.5121 | 0.5715 |
-| **FM (official baseline)** | **0.6610** | **0.5282** | **0.5946** |
+| GAUC | 0.4996 | 0.6610 | **1.0000** |
+| nDCG@5 | 0.4511 | 0.5282 | **0.7289** |
+| **primary** | 0.4753 | **0.5946** | **0.8645** |
 
-### ⚠️ The real range of the metric: the ceiling for nDCG@5 is 0.729, not 1.0
+The baseline already captures about a third of the usable range — measure progress against
+0.8645 as the denominator, not 1.0. FM's std across 5 seeds is **0.0008**; the convergence rule
+is **ε = 0.002 (≈2.5σ), N = 3 consecutive iterations**.
 
-Among the 23,875 users in the test set:
-
-| | Share | Effect on the metric |
-|---|---|---|
-| All-negative users (none of the user's impressions are `long_view`) | **27.1%** | nDCG is always **0**; no model can fix this; excluded from GAUC |
-| All-positive users | **9.2%** | nDCG is always **1**; excluded from GAUC |
-| Users with discriminable labels | **63.7%** | The actual sample for GAUC |
-
-So even using the true labels as prediction scores (oracle, perfect ranking) only gets you:
-
-| | random | FM baseline | **oracle ceiling** | Range already captured by FM |
-|---|---|---|---|---|
-| GAUC | 0.4996 | 0.6610 | **1.0000** | 32.3% |
-| nDCG@5 | 0.4511 | 0.5282 | **0.7289** | 27.8% |
-| **primary** | 0.4753 | **0.5946** | **0.8645** | **30.7%** |
-
-**Measure your progress against the oracle as the denominator.** Seeing 0.5946 and concluding "that's still far from a perfect 1.0" is a misreading — the baseline has already captured about a third of the usable range, and the remaining headroom is 0.27, not 0.41.
-
-FM's std across 5 random seeds is **0.0008** for every metric. Based on that, the convergence criterion is **ε = 0.002 (≈2.5σ), N = 3**: if the validation primary score improves by no more than 0.002 for 3 consecutive iterations, treat it as converged.
-
-> Sanity check: if running `--model random` through your evaluation code does not give primary ≈ 0.475 (±0.001), your harness is broken — fix that first.
-
-## Submission format
-
-CSV with a header, one row per row of the evaluation set:
+### Submission format
 
 ```
 row_id,user_id,video_id,score
@@ -83,101 +220,11 @@ row_id,user_id,video_id,score
 ...
 ```
 
-| Field | Description |
-|---|---|
-| `row_id` | Consecutive, starting at 0, matching the row order of `data.load()[split]` (deterministic: read `log_standard_4_08_to_4_21_pure.csv` first, then `log_standard_4_22_to_5_08_pure.csv`, filter by date, and preserve the original file order) |
-| `user_id` / `video_id` | Redundant fields, used only to verify alignment |
-| `score` | Your model's score for that row; any real number, only relative order matters; NaN / Inf not allowed |
-
-> **Why `row_id` is mandatory:** `(user_id, video_id)` is **not unique** in the evaluation set — 3.06% of the pairs in the test set are duplicates, repeating up to 12 times. So it cannot serve as a primary key.
-
-Generating and validating:
+`row_id` is the primary key (consecutive from 0, matching `data.load()[split]`'s row order) —
+`(user_id, video_id)` is not unique in the evaluation set (3.06% of test pairs repeat, up to 12
+times).
 
 ```bash
-python3 submit.py --make  --split test  submission.csv    # generate a sample submission using the official FM baseline
-python3 submit.py --check --split test  submission.csv    # validate format and alignment
-python3 submit.py --score --split valid submission.csv    # validate and score (available locally for valid)
+python3 kit/submit.py --check --split test --data_dir KuaiRand-Pure/data submission.csv
+python3 kit/submit.py --score --split valid --data_dir KuaiRand-Pure/data submission.csv
 ```
-
-`--check` will reject: wrong header, wrong row count, gaps in `row_id`, `user_id`/`video_id` misaligned with the evaluation set, and `score` values that are non-numeric or NaN/Inf. **Please run `--check` yourself before submitting.**
-
-## Where to start making changes
-
-The ordering below is **empirically tested**, not guesswork. Dead ends the organizers have already tried are marked explicitly — don't repeat them.
-
-### Already tested: these two yield nothing, don't waste iterations on them
-
-| What was tried | Result |
-|---|---|
-| **Adding static features** — wiring in all 13 of CWM's feature fields (+`music_id`/`video_type`/`upload_type` + 6 coarse user-side buckets) | primary **0.5940** vs **0.5950** with 5 fields — indistinguishable within noise, if anything slightly worse |
-| **Adding model capacity** — embedding dimension k = 8 / 16 / 32 | 0.5895 / 0.5902 / 0.5887, essentially flat |
-
-The reason: the `user_id × video_id` cross already absorbs most of the learnable signal. Coarse buckets like `follow_user_num_range` are redundant once you have `user_id`; and 1.14M rows can't support more capacity anyway. **The bottleneck is neither features nor capacity.**
-
-⚠️ Also note: **first-order terms on purely user-side features contribute exactly 0 to the score.** Because ranking happens within a user, any term that is constant within a user does not change the intra-group ordering (measured: `item_pop × user bias` and plain `item_pop` give scores identical to the last digit). User-side features can only take effect through **cross terms with the item side**.
-
-### Unexplored: the headroom should be here
-
-Ordered by our estimate of how promising they are (**the organizers have not tested any of these — they're left for you**):
-
-1. **Change the loss function.** Currently it's pointwise logloss, but the metrics (GAUC / nDCG) are **ranking metrics**. Switching to pairwise (BPR) or listwise (softmax over that user's impressions) aligns the objective with the evaluation convention — we think this is the most likely to work.
-2. **User behavior sequences.** The existing features **make no use of behavior sequences at all**. Each KuaiRand user has hundreds to thousands of interactions in train; interest modeling in the DIN / SIM family is a completely blank direction here.
-3. **Multi-objective.** The logs also contain `is_click`, `is_like`, `is_follow`, `is_comment`, `is_forward`, and `play_time_ms`, which can serve as auxiliary tasks for the main `long_view` task.
-4. **Modeling watch time.** This is exactly the contribution of [CWM](https://github.com/hyz20/CWM): it treats watch time as **censored regression** (when a video plays to completion the true watch time is truncated, so it uses a one-sided loss rather than squared error). This is a direction with real research depth.
-5. **Change the model.** DeepFM / DCN / xDeepFM. Since capacity has been measured not to be the bottleneck, **give this lower priority than 1-4.**
-6. **Time features and distribution drift.** `hourmin`, `date`, and the drift between train and test.
-7. **Unbiased validation (advanced).** `log_random_4_22_to_5_08_pure.csv` is a random-exposure log (1.18M rows) that can serve as an extra unbiased validation set to check whether your model only overfits biased traffic.
-
-## Using your own model (including CWM)
-
-`evaluate.py` is fully decoupled from the model; it only needs three equal-length arrays:
-
-```python
-from evaluate import evaluate
-print(evaluate(user_ids, labels, scores))   # scores can come from any model
-```
-
-- `user_ids`: the user_id for each row of the evaluation set
-- `labels`: that row's `long_view` (0/1)
-- `scores`: your model's score for that row (any real number, only relative order matters)
-
-So you can skip `baseline.py` entirely and use PyTorch, LightGBM, or [CWM](https://github.com/hyz20/CWM)'s xDeepFM instead — just hand your `scores` to `evaluate()` at the end. **`evaluate.py` is the sole authority on scoring.**
-
-> A caveat on using CWM: it depends on `torch==1.6.0` (a 2020 release, which probably won't install on newer GPUs), and its loss optimizes counterfactual watch time while its evaluation label is a self-reconstructed `long_view2`. It's the research code for a watch-time debiasing paper — useful as an **advanced reference**, not recommended as a starting point.
-
-## Files
-
-| | |
-|---|---|
-| `evaluate.py` | Metric implementation + all scoring conventions. **Do not modify.** |
-| `data.py` | Data loading, official splits, feature encoding. Add features here. |
-| `baseline.py` | The three baselines. FM is the one to beat. |
-| `baseline_scores.json` | Officially published scores + seed variance + convergence parameters. |
-| `submit.py` | Generate / validate submission files. |
-| `ablation_features.py` | Feature ablation experiments; reproduces the "adding features yields nothing" numbers. |
-
-## Progress log
-
-### 2026-08-29 — Baseline reproduction confirmed
-
-Ran `python3 baseline.py --model random` and `--model fm` locally against the downloaded `KuaiRand-Pure/data` directory.
-
-**Sanity check (random):** primary 0.4757 vs. published ≈0.4753 (±0.001) — harness intact.
-
-**FM baseline (seed=0, test split):**
-
-| | GAUC | nDCG@5 | primary |
-|---|---|---|---|
-| Official FM (test) | 0.6610 | 0.5282 | 0.5946 |
-| This run, seed=0 (test) | 0.6621 | 0.5286 | 0.5953 |
-| Δ | +0.0011 | +0.0004 | +0.0007 |
-
-Δ is within the published seed noise (std = 0.0008 over 5 seeds) — a faithful reproduction, not a fluke. Training converged in ~16.6s CPU (11 epochs, early stop), faster than the README's ~40s estimate.
-
-**Status:** Task requirement 1 (reproduce the official baseline) is satisfied. **0.5946–0.5953 is the number to beat** on the hidden test set going forward.
-
-**⚠️ Open question — metric spec discrepancy, needs resolution before scoring further iterations:**
-
-A constraints/scope document for this challenge states the official metrics are **NDCG@10 / Recall@50, with `click` as the positive label**. That does not match what's implemented here: `evaluate.py`, `baseline_scores.json`, and this README are all built around **GAUC / nDCG@5, with `long_view` as the label**. These are not reconcilable by a config flag — different label, different k, different second metric (Recall@50 vs. GAUC) — so "improvement" means different things depending on which spec is authoritative. Flagging this now, before investing further iterations, rather than after.
-
-**Next step (pending the above):** per the README's own untested-and-ranked list, implement a ranking-aware loss (pairwise BPR, or per-user listwise softmax as a follow-up) in place of pointwise logloss in `baseline.py`'s `FM.step()`. Rationale: FM currently trains pointwise while both candidate metric families are within-user ranking metrics — a structural objective/metric mismatch that feature and capacity sweeps (already shown flat, see above) cannot fix. Lower-risk first probe given the hand-rolled numpy/no-autodiff setup; ~20s per run, no new data wiring required.
