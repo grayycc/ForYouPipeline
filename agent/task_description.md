@@ -98,6 +98,16 @@ is noise, not a result. Do not build on top of a change you have not separated f
 | `log_standard_4_08_to_4_21_pure.csv` | train window; 19 columns, **11 of them post-interaction — see below** |
 | `log_standard_4_22_to_5_08_pure.csv` | valid+test window |
 
+Their 19 raw columns, exactly, are: `user_id`, `video_id`, `date`, `hourmin`, `time_ms`,
+`is_click`, `is_like`, `is_follow`, `is_comment`, `is_forward`, `is_hate`, `long_view`,
+`play_time_ms`, `duration_ms`, `profile_stay_time`, `comment_stay_time`, `is_profile_enter`,
+`is_rand`, `tab`. **`author_id` is not one of them** — these logs only carry `video_id`;
+`author_id` exists only after joining `video_features_basic_pure.csv` on it, which is exactly
+what `load()` already does for you. Reading these files directly with `csv.DictReader` and
+indexing `row['author_id']` raises `KeyError`; this has happened in past runs. Call `load()`
+unless you specifically need a raw column `load()` does not carry, such as `is_click` or
+`hourmin`.
+
 **Eleven of those 19 columns describe what happened *during* the impression, and none of them
 may be used as a feature for that row.** They are:
 
@@ -231,6 +241,15 @@ These were measured by the organisers and by prior runs. Treat them as known.
     seeds 0-4, convert each model's scores to within-user fractional ranks, then average the
     ranks rather than the raw scores. Averaging raw scores gave about half as much; the
     rank-space step is where most of it came from, because the metric only reads ordering.
+
+    **This has a real cost you should size against your own iteration budget.** A promising
+    node's whole script is re-run twice more to confirm the score on other seeds, so an
+    ensemble trained *inside* your script multiplies: a 5-model internal ensemble becomes up
+    to 15 model trainings for that one node, and one measured instance of this took ~19
+    minutes wall-clock for a model that otherwise trains in seconds. That is not wasted --
+    it produced the gain above -- but it is 15-20x a non-ensembled node's cost, so an
+    ensemble size chosen without this in mind can eat a large share of the wall-clock ceiling
+    for a handful of iterations.
   - **Bayesian-smoothed per-video and per-author long-view rate, bucketed: +0.0008.** Computed
     from training rows only and smoothed toward the global rate so rare IDs are not trusted.
   - Those two together account for +0.0024 of a best-ever +0.0025, and they compose: the
