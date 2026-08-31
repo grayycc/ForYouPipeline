@@ -277,6 +277,12 @@ class Agent:
                 spec = spec2
                 node.gate_result = 'passed_after_replan' if ok2 else 'passed_with_warnings'
                 if not ok2:
+                    # A closed mechanism is recorded distinctly. Everything else the gates raise
+                    # is advisory by design, but this one means the planner re-proposed a family
+                    # whose every attempt came back worse even after being told it was closed --
+                    # which is the pattern worth being able to count in the log afterwards.
+                    if any('is closed:' in r for r in reasons2):
+                        node.gate_result = 'closed_mechanism_override'
                     print(f'  [gates] still flagged, proceeding anyway: {reasons2[0]}')
             else:
                 node.gate_result = 'passed_with_warnings'

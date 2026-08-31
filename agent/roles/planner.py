@@ -109,6 +109,12 @@ def _build_prompt(iteration, journal, extra: str = '') -> str:
         if best.stdout_tail:
             parts.append(f'\nIts output:\n```\n{best.stdout_tail}\n```')
 
+    # Before the softer "what the evidence has and has not settled" block, because this one is
+    # enforced: a spec matching a closed family is rejected by the gates, not merely flagged.
+    exhausted = diagnose.exhausted_block(journal)
+    if exhausted:
+        parts.append(f'\n{exhausted}')
+
     ruled_out = diagnose.ruled_out_block(journal)
     if ruled_out:
         parts.append(f'\n{ruled_out}')
@@ -148,6 +154,14 @@ did not test its hypothesis at all -- its low score says the optimisation failed
 idea is wrong, and treating the two the same way abandons directions that were never tried. A
 node marked `overfit` fit the training data and failed to generalise, which points at the
 feature's sparsity rather than at the mechanism behind it.
+
+Every iteration costs the same whatever you spend it on, so the question is not "might this
+help?" but "if this works as well as I expect, will the result be readable?". A change whose
+honest best case is under 0.002 cannot clear the noise floor: it will come back diagnosed
+`noise` whether the mechanism was real or not, and you will have bought an unfalsifiable
+result at the price of a testable one. State your expected effect honestly and, if it lands
+below 0.002, prefer the candidate whose effect would be large enough to see. Being wrong about
+a big change teaches more than being right about an invisible one.
 
 Whatever you change must live inside the standalone solution file itself, including any feature
 logic, computed from train-only history when relevant.

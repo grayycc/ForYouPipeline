@@ -56,6 +56,21 @@ def check_spec(spec: ExperimentSpec, journal) -> Tuple[bool, List[str]]:
         reasons.append(f'`implementation_scope` lists {len(spec.implementation_scope)} files; '
                        f'at most {MAX_SCOPE_FILES} for a single atomic change')
 
+    # exhausted mechanism -- a family with three or more attempts, none accepted and none even
+    # inside the noise band. Unlike the duplicate check below this is not a "say why" warning:
+    # runs/v6 flagged its tree-model repeats seven times and the planner argued past every one,
+    # spending 23% of the run on a mechanism whose every attempt came back worse.
+    from . import diagnose
+    dead = {f: ids for f, ids in diagnose.exhausted_mechanisms(journal)}
+    if dead:
+        for family in sorted(diagnose.families_of(spec.tags) & set(dead)):
+            ids = ', '.join(f'node {i}' for i in dead[family])
+            reasons.append(
+                f'`{family}` is closed: {len(dead[family])} attempts ({ids}), none accepted and '
+                f'none even inside the noise band. Choose a different mechanism -- a further '
+                f'variation on this one is not a valid proposal, and arguing that yours differs '
+                f'is not an exception')
+
     # duplicate -- do not spend a scarce iteration re-running a settled question
     dup = _find_duplicate(spec, journal)
     if dup is not None:

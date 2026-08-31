@@ -297,3 +297,83 @@ def test_a_leak_whose_reason_denies_leakage_is_not_a_leak():
     # hedging alone must still block -- real leaks are often reported with "may"/"could"
     assert not reviewer._concedes_not_leakage(
         'Lines 46-48 may aggregate splits["valid"] labels into a feature used to score valid.')
+
+
+# --- closed mechanisms: binding, not advisory ------------------------------------------
+
+def _v6_journal():
+    """runs/v6's real log, which is what the closed-mechanism rule was measured against."""
+    import json, os
+    from agent.journal import Journal, Node
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        'runs', 'v6', 'log.jsonl')
+    j = Journal()
+    for line in open(path):
+        d = json.loads(line)
+        n = Node(id=d['iter'], parent_id=d.get('parent_id'), operation=d['operation'])
+        n.is_buggy = d.get('is_buggy', False)
+        n.val_primary = d.get('val_primary')
+        n.train_primary = d.get('train_primary')
+        n.accepted = d.get('accepted', False)
+        if d.get('tags'):
+            n.spec = {'tags': d['tags'], 'proposed_change': d.get('proposed_change', '')}
+        j.append(n)
+    return j
+
+
+def test_only_the_tree_family_is_closed_on_v6():
+    """7 attempts, 0 accepted, every one regression/overfit -- 23% of the run. Everything else
+    must stay open, and for reasons that are not "it happened to be under the threshold"."""
+    j = _v6_journal()
+    closed = dict(diagnose.exhausted_mechanisms(j))
+    assert list(closed) == ['gradient-boosted trees'], closed
+    assert len(closed['gradient-boosted trees']) == 7
+
+
+def test_a_family_that_ever_produced_an_accept_is_never_closed():
+    """FM feature work was v6's largest family and produced 3 of its 7 improvements; ensembling
+    produced 3 more. A rule that closed those would remove everything that ever worked."""
+    j = _v6_journal()
+    closed = dict(diagnose.exhausted_mechanisms(j))
+    assert 'factorization machine' not in closed
+    assert 'ensembling' not in closed
+
+
+def test_a_family_with_a_noise_verdict_stays_open():
+    """v6's ranking-objective family is 0-for-6, but one attempt landed in the noise band.
+    `noise` means the result could not be resolved, which is not evidence the idea is wrong."""
+    j = _v6_journal()
+    assert 'ranking objective' not in dict(diagnose.exhausted_mechanisms(j))
+
+
+def test_closed_mechanism_is_a_hard_gate_reason():
+    from agent import gates
+    from agent.spec import ExperimentSpec
+    j = _v6_journal()
+    spec = ExperimentSpec(
+        hypothesis='h' * 40, mechanism='m' * 40, proposed_change='p' * 40,
+        expected_result='0.004', falsification_condition='f' * 40, target_metric='both',
+        risks={'leakage': 'none', 'overfitting': 'x', 'runtime': 'y'},
+        implementation_scope=['solution.py'],
+        tags=['xgboost', 'rank-ndcg', 'pairwise-ranking-objective'],
+        evidence={'task_structure': 'a' * 30, 'previous_experiments': 'b' * 30, 'literature': ''})
+    ok, reasons = gates.check_spec(spec, j)
+    assert not ok
+    assert any('is closed:' in r for r in reasons), reasons
+
+    spec.tags = ['user-history', 'sequence-features', 'within-user-ranking']
+    _, reasons2 = gates.check_spec(spec, j)
+    assert not any('is closed:' in r for r in reasons2), reasons2
+
+
+def test_tree_family_matches_however_the_planner_spells_it():
+    """The v8 smoke run tagged a LightGBM ranker `lgbm-ranker`, which does not contain the
+    string `lightgbm`, so it escaped the family and was counted as a ranking-objective
+    experiment only. Every spelling the planner has actually produced must land in the family,
+    or the closed-mechanism count silently under-reports."""
+    for tag in ('gbdt', 'lightgbm', 'lgbm-ranker', 'xgboost', 'tree-model', 'catboost',
+                'gradient-boosted-trees'):
+        assert 'gradient-boosted trees' in diagnose.families_of([tag]), tag
+    # and the families it must not swallow
+    for tag in ('fm', 'listnet', 'ensemble', 'user-history'):
+        assert 'gradient-boosted trees' not in diagnose.families_of([tag]), tag

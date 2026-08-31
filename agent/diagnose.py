@@ -88,8 +88,20 @@ TAG_OVERLAP = 0.5
 
 
 def _tags(node) -> set:
+    """Tags with the duplicate gate's synonym map applied, but *not* its token expansion.
+
+    The gate also splits each hyphenated tag into its tokens, which is right for asking "is this
+    one spec the same as that one node" and wrong here. Clustering is single-link, so the
+    generic tokens that expansion produces -- `features`, `objective`, `user`, `loss` -- act as
+    bridges: on runs/v6 they chained nineteen nodes spanning four unrelated mechanisms into one
+    cluster. Synonyms alone still fold `lightgbm`/`xgboost` into `gbdt`, which is the part that
+    matters, without the bridging.
+    """
+    from . import gates
     spec = node.spec or {}
-    return {str(t).lower().strip() for t in (spec.get('tags') or []) if str(t).strip()}
+    return {gates._TAG_SYNONYMS.get(t, t)
+            for t in (str(x).lower().strip() for x in (spec.get('tags') or []))
+            if t}
 
 
 def _mechanism_key(node) -> str:
@@ -280,4 +292,100 @@ def calibration_block(journal, min_rows: int = 3) -> str:
               'noise, and it costs the same iteration as one that could settle something. This '
               'is a statement about the size of your forecasts, not a suggestion about which '
               'direction to take.']
+    return '\n'.join(lines)
+
+
+# Mechanism families, matched on substrings of the planner's own tags. A binding gate has to be
+# deterministic and auditable, so the axis is declared here rather than inferred from tag
+# similarity. Tag-overlap clustering was tried for this and does not survive contact with real
+# tags: on runs/v6 no threshold grouped the seven tree-model attempts without also merging
+# unrelated mechanisms, because the discriminating token is one word inside tag sets that are
+# otherwise unlike each other. A node may belong to several families; it counts in each.
+_FAMILY_MARKERS = (
+    # `gbm` rather than `lightgbm`: the v8 smoke run tagged a LightGBM ranker `lgbm-ranker`,
+    # which does not contain `lightgbm` and so escaped this family entirely. `gbm` is a
+    # substring of lightgbm, lgbm-ranker and gbm alike.
+    ('gradient-boosted trees', ('gbdt', 'gbm', 'xgboost', 'catboost', 'boosted', 'tree',
+                                'forest')),
+    ('factorization machine', ('fm', 'factorization')),
+    ('neural architecture', ('neural', 'mlp', 'deep', 'attention', 'din', 'transformer')),
+    ('ranking objective', ('bpr', 'pairwise', 'listwise', 'listnet', 'lambdarank', 'softmax',
+                           'ranking-objective', 'ndcg-optimization')),
+    ('ensembling', ('ensemble', 'blend', 'rank-aggregation', 'variance-reduction')),
+    ('item-side statistics', ('item-ctr', 'video-ctr', 'author-ctr', 'content-features',
+                              'video-metadata', 'video-categories', 'video-popularity')),
+    ('user-side interaction features', ('affinity', 'user-conditional', 'user-history',
+                                        'sequence', 'user-tab', 'personalized')),
+)
+
+
+def families_of(tags) -> set:
+    """Which mechanism families a raw tag list belongs to. One definition, used by both the
+    closed-mechanism report here and the gate that enforces it, so the two cannot drift."""
+    from . import gates
+    norm = {gates._TAG_SYNONYMS.get(t, t)
+            for t in (str(x).lower().strip() for x in (tags or [])) if t}
+    return {name for name, markers in _FAMILY_MARKERS
+            if any(m in t for t in norm for m in markers)}
+
+
+def _families(node) -> set:
+    return families_of((node.spec or {}).get('tags') or [])
+
+
+def exhausted_mechanisms(journal, min_attempts: int = 3):
+    """Families the evidence has actually closed, as [(family, node_ids)].
+
+    Three conditions, all required:
+
+    - at least `min_attempts` scoring nodes in the family,
+    - **not one of them accepted**, and
+    - **not one diagnosed `noise` or `improvement`.**
+
+    The accepted-count condition is what keeps this honest. runs/v6's largest family was FM
+    feature work, and blocking it would have removed three of the run's seven improvements. The
+    noise condition matters just as much: `noise` means the result could not be resolved against
+    the floor, which is not evidence the mechanism is wrong -- v6's ranking-objective family is
+    0-for-6 but one attempt was noise, so it stays open.
+
+    What the rule does close on v6's log is gradient-boosted trees: nodes 2, 3, 4, 11, 18, 23,
+    30 -- seven attempts, zero accepted, every one `regression` or `overfit`. That is 23% of the
+    run spent re-refuting a settled question, and it is the case this exists for.
+    """
+    resolved = [n for n in getattr(journal, 'nodes', [])
+                if not n.is_buggy and n.val_primary is not None and n.operation != 'baseline']
+    verdicts = {n.id: classify(n, journal) for n in resolved}
+
+    out = []
+    for family, _ in _FAMILY_MARKERS:
+        members = [n for n in resolved if family in _families(n)]
+        if len(members) < min_attempts:
+            continue
+        if any(n.accepted for n in members):
+            continue
+        vs = {verdicts[n.id] for n in members}
+        if vs & {NOISE, IMPROVEMENT}:
+            continue
+        out.append((family, [n.id for n in members]))
+    return out
+
+
+def exhausted_block(journal) -> str:
+    """Prompt section naming families that may not be proposed again."""
+    dead = exhausted_mechanisms(journal)
+    if not dead:
+        return ''
+    lines = ['# Mechanisms this run has closed',
+             '',
+             'Each was tried at least three times, was never once accepted, and never once even '
+             'landed inside the noise band -- every single attempt came back measurably worse '
+             'than what it branched from. These are settled. A further variation will be '
+             'rejected rather than run, so proposing one costs the iteration and returns '
+             'nothing.',
+             '']
+    for family, ids in dead:
+        lines.append(f'- **{family}** -- {len(ids)} attempts '
+                     f'({", ".join(f"node {i}" for i in ids)}), all worse than their parent.')
+    lines.append('')
+    lines.append('Spend this iteration on a mechanism that is still open.')
     return '\n'.join(lines)

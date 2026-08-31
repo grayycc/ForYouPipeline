@@ -209,6 +209,23 @@ These were measured by the organisers and by prior runs. Treat them as known.
   cancels out entirely. This was measured: item-popularity alone and item-popularity crossed
   with a user bias term scored identically to the last digit. User-side information can
   therefore only matter through terms that vary across the videos shown to that same user.
+- **A static attribute of `video_id` is very nearly a no-op, because the model already has a
+  free embedding per `video_id`.** `video_type`, `first_level_category_id`, and any
+  train-window CTR bucket are all pure functions of `video_id` (measured: 7583 videos, zero
+  video_id -> video_type conflicts). A function of an ID adds information beyond that ID's own
+  embedding *only* where the ID was too rare to learn an embedding for — i.e. cold-start. In
+  the validation window that is **17 rows out of 124,909, or 0.01%**. So the ceiling on any
+  such feature is 0.01% of rows, which is far below the 0.002 noise floor. This is measured,
+  not predicted: it is why every item-side categorical tried so far (video CTR bucket, author
+  CTR bucket, category, video_type, finer CTR bins) landed between +0.0002 and +0.0005.
+  Their real value is as a *smoothed prior for rare IDs*, not as new signal.
+- **The coverage asymmetry.** The same measurement run on the user side: **98.4%** of
+  validation rows belong to a user who has training history, median 35 prior interactions,
+  p10 = 6. Per-user aggregates still cancel (see above), so what this coverage buys is
+  *interaction* terms — a statistic of this user crossed with an attribute of the candidate
+  video, which does vary across that user's list. Attempts at this have so far failed by
+  overfitting rather than by absence of signal (one hit train 0.9742 / valid 0.5808, a gap of
+  0.39), which is a statement about the estimator, not about the mechanism.
 
 ## Your output contract — every iteration
 
